@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07080c">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="same-origin">
+<title>Veil</title>
+<link rel="icon" href="/__px/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/__px/static/app.css">
+<script src="/__px/static/app.js" defer></script>
+</head>
+<body class="view-home">
+<div class="backdrop" aria-hidden="true"></div>
+
+<!-- Browsing toolbar -->
+<header class="toolbar glass" id="toolbar">
+  <nav class="nav-buttons" aria-label="Page navigation">
+    <button class="icon-btn" id="btn-back" type="button" aria-label="Back" title="Back">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-forward" type="button" aria-label="Forward" title="Forward">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-reload" type="button" aria-label="Reload" title="Reload">
+      <svg class="i-reload" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
+      <svg class="i-stop" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <button class="icon-btn hide-sm" id="btn-home" type="button" aria-label="Home" title="Home">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-7 8 7"/><path d="M6 10v10h12V10"/></svg>
+    </button>
+  </nav>
+
+  <form class="address" id="address-form" action="/__px/go" method="get" role="search" autocomplete="off">
+    <span class="scheme" id="scheme-icon" aria-hidden="true">
+      <svg class="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      <svg class="i-open" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/></svg>
+      <svg class="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+    </span>
+    <label class="sr-only" for="address-input">Address or search</label>
+    <input id="address-input" name="q" type="text" inputmode="url" spellcheck="false" autocapitalize="off"
+           placeholder="Search or enter address" enterkeyhint="go">
+  </form>
+
+  <div class="tool-actions">
+    <button class="icon-btn hide-sm" id="btn-newtab" type="button" aria-label="Open page in a new tab" title="Open in new tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+    </button>
+    <div class="menu-wrap">
+      <button class="icon-btn" id="btn-menu" type="button" aria-label="More options" aria-haspopup="menu" aria-expanded="false" title="More">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5.5" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="12" cy="18.5" r="1.3"/></svg>
+      </button>
+      <div class="menu glass" id="menu" role="menu" hidden>
+        <button type="button" role="menuitem" data-action="home" class="show-sm">Home</button>
+        <button type="button" role="menuitem" data-action="newtab" class="show-sm">Open in new tab</button>
+        <button type="button" role="menuitem" data-action="copy">Copy page address</button>
+        <button type="button" role="menuitem" data-action="clear" class="danger">Clear session data</button>
+      </div>
+    </div>
+  </div>
+  <div class="progress" id="progress" aria-hidden="true"><span></span></div>
+</header>
+
+<!-- Landing -->
+<main class="home" id="home">
+  <div class="home-inner">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <defs><linearGradient id="bm" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b9c6ff"/><stop offset="1" stop-color="#6f86ff"/></linearGradient></defs>
+        <path d="M6 7c3.5 0 6 2 10 12 4-10 6.5-12 10-12" fill="none" stroke="url(#bm)" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M9 25h14" stroke="url(#bm)" stroke-width="2.6" stroke-linecap="round" opacity=".55"/>
+      </svg>
+      <h1>Veil</h1>
+    </div>
+    <p class="tagline">Browse the web through a hardened, server-side relay.</p>
+
+    <form class="hero-search glass" id="hero-form" action="/__px/go" method="get" role="search" autocomplete="off">
+      <svg class="hero-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+      <label class="sr-only" for="hero-input">Search or enter a web address</label>
+      <input id="hero-input" name="q" type="text" inputmode="url" spellcheck="false" autocapitalize="off" autofocus
+             placeholder="Search or enter a web address" enterkeyhint="go">
+      <button class="btn btn-primary" type="submit">Go</button>
+    </form>
+
+    <ul class="quick" aria-label="Suggestions">
+      <li><button type="button" data-go="https://en.wikipedia.org/">Wikipedia</button></li>
+      <li><button type="button" data-go="https://news.ycombinator.com/">Hacker News</button></li>
+      <li><button type="button" data-go="https://developer.mozilla.org/">MDN</button></li>
+      <li><button type="button" data-go="https://duckduckgo.com/html/">DuckDuckGo</button></li>
+    </ul>
+
+    <p class="fineprint">
+      Requests are made by this server. Private and internal networks are blocked.
+      Cookies stay on the server for your session and are never shared with other sites.
+    </p>
+  </div>
+</main>
+
+<!-- Page viewport -->
+<section class="viewport" id="viewport" aria-label="Page">
+  <iframe id="frame" title="Proxied page" referrerpolicy="same-origin"></iframe>
+</section>
+
+<div class="toast glass" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
