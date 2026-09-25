@@ -5,6 +5,7 @@ import { decodeProxyPath, encodeProxyPath, rewriteUrl } from '../src/proxy/urlco
 import { rewriteHtml, rewriteSrcset } from '../src/rewrite/html.js';
 import { rewriteCss } from '../src/rewrite/css.js';
 import { RateLimiter, ConcurrencyGate } from '../src/security/limits.js';
+import { loadConfig } from '../src/config.js';
 
 const base = { allowedHosts: [], blockedHosts: [], blockedCidrs: [], allowedPorts: [80, 443], publicHosts: [] };
 const policy = new HostPolicy(base);
@@ -210,4 +211,18 @@ test('concurrency gate queues and times out', async () => {
   const rel2 = await waiting;
   await assert.rejects(g.acquire('x'), /Timed out/);
   rel2();
+});
+
+test('Coolify domains are picked up as the proxy\'s own hosts', () => {
+  process.env.COOLIFY_FQDN = 'https://proxy.example.com,https://www.proxy.example.com:43117';
+  process.env.PUBLIC_HOSTNAMES = 'alt.example.net';
+  try {
+    const cfg = loadConfig();
+    assert.deepEqual(cfg.publicHosts.sort(), ['alt.example.net', 'proxy.example.com', 'www.proxy.example.com']);
+    const p = new HostPolicy(cfg);
+    assert.throws(() => p.validateUrl('https://proxy.example.com/'), PolicyError);
+  } finally {
+    delete process.env.COOLIFY_FQDN;
+    delete process.env.PUBLIC_HOSTNAMES;
+  }
 });
