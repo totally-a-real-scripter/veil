@@ -41,7 +41,7 @@ export function renderErrorPage(o: ErrorPageOptions): string {
   ${target}
   <div class="err-actions">
     ${retry}
-    <a class="btn" href="/__px/" target="_top">Back to start</a>
+    <a class="btn" href="/__px/" target="_parent">Back to start</a>
   </div>
 </main>
 </body>

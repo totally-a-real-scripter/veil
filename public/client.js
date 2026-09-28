@@ -148,7 +148,8 @@
     try {
       var p = window.parent;
       var ppath = p.location.pathname;
-      if (p === window.top && (ppath === '/' || ppath === '/__px/')) allowed = true; // the proxy UI
+      // Directly inside the proxy UI (which may itself be embedded in a host site).
+      if (/^\/(__px\/?)?$/.test(ppath) || /^(\/__px)?\/ai\/?$/.test(ppath)) allowed = true;
       else if (cfg.frameGuard === 'sameorigin') {
         var pr = unproxy(p.location.href);
         allowed = !!pr && pr.origin === currentReal().origin;
@@ -551,7 +552,9 @@
 
   function report(type) {
     try {
-      if (window.parent === window || window.parent !== window.top) return;
+      // Only the UI shell listens (it checks the message source); nested
+      // frames posting to a proxied parent page are simply ignored there.
+      if (window.parent === window) return;
       window.parent.postMessage(
         { __px: 1, type: type || 'nav', url: currentReal().href, title: document.title || '' },
         cfg.mode === 'sandbox' ? '*' : proxyOrigin,

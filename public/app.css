@@ -274,7 +274,7 @@ body.view-browse .home, body.view-browse .backdrop { display: none; }
 }
 body.ai-open .ai-view { transform: none; visibility: visible; transition: transform .5s cubic-bezier(.22,.8,.22,1), visibility 0s; }
 body.ai-open .main-view {
-  transform: translate3d(-22%, 0, 0); filter: brightness(.55) blur(2px); pointer-events: none;
+  transform: translate3d(-100%, 0, 0); filter: brightness(.55) blur(2px); pointer-events: none;
   /* Fades out while it slides, so it's already gone when it's hidden at the end. */
   opacity: 0;
   visibility: hidden;
@@ -303,6 +303,8 @@ body.ai-dragging .ai-view, body.ai-dragging .main-view { transition: none; }
 .ai-fab:hover { transform: translateY(-2px); border-color: rgba(var(--accent-rgb), .6); box-shadow: 0 16px 48px -12px rgba(var(--accent-rgb), .75); }
 .ai-fab:active { transform: scale(.97); }
 body.view-browse .ai-fab { display: none; }
+/* Inside a host site (e.g. the games portal) its header has the AI button. */
+body.embedded .ai-fab { display: none; }
 .ai-btn svg { color: var(--accent-2); }
 
 .hint-ai {

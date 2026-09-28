@@ -14,8 +14,13 @@
 
   var current = null; // real URL currently displayed
   var pageTitle = 'Veil';
-  function onAiPage() { return /^\/ai\/?$/.test(location.pathname); }
-  function mainUrl() { return current ? '/#' + encodeURIComponent(current.href) : '/'; }
+  // The shell runs at "/" when the proxy has its own domain, or at "/__px/" when
+  // it's embedded in another site (e.g. the games portal).
+  var BASE = location.pathname.indexOf('/__px') === 0 ? '/__px/' : '/';
+  var EMBEDDED = window.parent !== window;
+  if (EMBEDDED) body.classList.add('embedded');
+  function onAiPage() { return /^(\/__px)?\/ai\/?$/.test(location.pathname); }
+  function mainUrl() { return current ? BASE + '#' + encodeURIComponent(current.href) : BASE; }
   function setTitle(t) {
     pageTitle = t;
     if (!body.classList.contains('ai-open')) document.title = t;
@@ -220,6 +225,8 @@
     try { initial = new URL(decodeURIComponent(location.hash.slice(1))); } catch (e) { initial = null; }
   }
   window.Veil = {
+    base: BASE,
+    embedded: EMBEDDED,
     go: go,
     mainUrl: mainUrl,
     restoreTitle: function () { document.title = pageTitle; },

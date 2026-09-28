@@ -461,6 +461,10 @@ This is a review of the specific risks the implementation was checked against. M
 
 ---
 
+## Embedding in another site
+
+The interface also works under `/__px/` inside another site on the same address. The games portal integration does this: nginx forwards `/p/` and `/__px/` to the proxy, and forwards root-relative requests whose `Referer` is a `/p/` page. The host page shows `/__px/` (Browse) or `/__px/ai` (AI) in an iframe. It can switch views with `postMessage({ veilCmd: 'ai' | 'browse' })`, and it hears `{ veilShell: 1, view }` back when the user switches inside.
+
 ## Limitations
 
 - **JavaScript is not rewritten.** URLs assembled at runtime are handled by the client runtime and the root-relative fallback, but static `import` statements with absolute third-party URLs and scripts that assign `location.href` to an absolute URL (outside Chromium) can still break or be blocked by the CSP. Heavily scripted apps (Google Docs, some streaming sites) may not work.

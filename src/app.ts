@@ -77,6 +77,9 @@ function loadStatic(): Map<string, StaticFile> {
   // The AI page is a client-side view of the same app shell.
   map.set('/ai', map.get('/')!);
   map.set('/ai/', map.get('/')!);
+  // Embedded under /__px/ in a host site (see the games portal integration).
+  map.set('/__px/ai', map.get('/')!);
+  map.set('/__px/ai/', map.get('/')!);
   map.set('/favicon.ico', map.get('/__px/static/favicon.svg')!);
   map.set('/robots.txt', { body: Buffer.from('User-agent: *\nDisallow: /\n'), type: 'text/plain; charset=utf-8', cache: 'public, max-age=86400' });
   return map;

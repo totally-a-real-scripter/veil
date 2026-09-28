@@ -91,8 +91,23 @@
   // the browser's Back button (and the in-page back arrow, Esc, or a swipe)
   // slide back to browsing. The browsing view stays mounted underneath, so the
   // proxied page keeps its state.
-  var AI_PATH = '/ai';
-  function isAiUrl() { return location.pathname === AI_PATH || location.pathname === AI_PATH + '/'; }
+  var AI_PATH = (window.Veil && window.Veil.base === '/__px/') ? '/__px/ai' : '/ai';
+  function isAiUrl() { return /^(\/__px)?\/ai\/?$/.test(location.pathname); }
+
+  // When embedded in a host site (e.g. the games portal), keep its header in
+  // sync and let its buttons switch between Browse and AI.
+  var EMBEDDED = window.parent !== window;
+  function tellParent(view) {
+    if (!EMBEDDED) return;
+    try { window.parent.postMessage({ veilShell: 1, view: view }, location.origin); } catch (e) {}
+  }
+  window.addEventListener('message', function (e) {
+    if (!EMBEDDED || e.source !== window.parent || e.origin !== location.origin) return;
+    var d = e.data;
+    if (!d || typeof d.veilCmd !== 'string') return;
+    if (d.veilCmd === 'ai') open();
+    else if (d.veilCmd === 'browse') close();
+  });
   function isOpen() { return body.classList.contains('ai-open'); }
 
   function show(animate) {
@@ -101,6 +116,7 @@
     if (!animate) body.classList.add('no-anim');
     body.classList.remove('ai-leaving');
     body.classList.add('ai-open');
+    tellParent('ai');
     panel.setAttribute('aria-hidden', 'false');
     $('main-view').setAttribute('aria-hidden', 'true');
     document.title = ($('ai-name').textContent || 'AI') + ' – Veil';
@@ -114,6 +130,7 @@
     if (!isOpen()) return;
     body.classList.add('ai-leaving'); // keep the background visible until the slide ends
     body.classList.remove('ai-open');
+    tellParent('browse');
     panel.setAttribute('aria-hidden', 'true');
     $('main-view').removeAttribute('aria-hidden');
     setTimeout(function () { body.classList.remove('ai-leaving'); }, 520);
@@ -189,7 +206,7 @@
       if (Math.abs(t.clientY - startY) > dx && dx < 12) { tracking = false; return; } // vertical scroll
       body.classList.add('ai-dragging');
       panel.style.transform = 'translate3d(' + dx + 'px,0,0)';
-      $('main-view').style.transform = 'translate3d(' + (-22 + (dx / window.innerWidth) * 22) + '%,0,0)';
+      $('main-view').style.transform = 'translate3d(' + (-100 + (dx / window.innerWidth) * 100) + '%,0,0)'; // moves in step with the finger
       $('main-view').style.opacity = String(Math.min(1, dx / (window.innerWidth * 0.6)));
     }, { passive: true });
     function end() {
