@@ -25,6 +25,8 @@ export interface AiConfig {
   maxHistoryChars: number;
   requestsPerHour: number;
   maxConcurrent: number;
+  /** Verify keys/models at startup via GET /models (uses no quota). */
+  startupCheck: boolean;
 }
 
 export type IsolationMode = 'compat' | 'sandbox';
@@ -173,6 +175,7 @@ function loadAiConfig(): AiConfig {
     maxHistoryChars: int('AI_MAX_HISTORY_CHARS', 16_000, 500, 1_000_000),
     requestsPerHour: int('AI_REQUESTS_PER_HOUR', 60, 1, 100_000),
     maxConcurrent: int('AI_MAX_CONCURRENT', 4, 1, 1_000),
+    startupCheck: bool('AI_STARTUP_CHECK', true),
   };
 }
 

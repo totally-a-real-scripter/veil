@@ -325,6 +325,12 @@ body.view-browse .ai-panel { top: calc(var(--toolbar-h) + env(safe-area-inset-to
 }
 .ai-suggest button:hover { background: rgba(var(--accent-rgb), .1); border-color: rgba(var(--accent-rgb), .35); transform: translateX(3px); }
 
+.ai-status { list-style: none; margin: 18px 0 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.ai-status li { font-size: 12px; color: var(--muted); padding: 4px 10px 4px 22px; border-radius: 999px; border: 1px solid var(--line); position: relative; }
+.ai-status li::before { content: ""; position: absolute; left: 9px; top: 50%; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; background: var(--ok); }
+.ai-status li.warn::before { background: #f5c56b; }
+.ai-status li.bad::before { background: var(--danger); }
+.ai-status b { color: var(--text); font-weight: 600; }
 .msg { display: flex; margin: 0 0 14px; animation: rise .3s cubic-bezier(.2,.7,.2,1) both; }
 .msg.user { justify-content: flex-end; }
 .msg .bubble { max-width: 88%; font-size: 14.5px; line-height: 1.6; overflow-wrap: anywhere; }
@@ -371,7 +377,7 @@ body.view-browse .ai-panel { top: calc(var(--toolbar-h) + env(safe-area-inset-to
 .ai-compose:focus-within { border-color: rgba(var(--accent-rgb), .55); box-shadow: 0 0 0 4px rgba(var(--accent-rgb), .12); }
 .ai-compose textarea {
   flex: 1; min-width: 0; resize: none; border: 0; outline: 0; background: transparent; color: var(--text);
-  font: 14.5px/1.5 var(--font); max-height: 180px; padding: 6px 0;
+  font: 14.5px/1.5 var(--font); min-height: 34px; max-height: 180px; padding: 6px 0;
 }
 .ai-compose textarea::placeholder { color: var(--faint); }
 .ai-send {

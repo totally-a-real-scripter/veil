@@ -4,7 +4,11 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { validateMessages, resetMs } from '../src/ai/chat.js';
+import { validateMessages, resetMs, failureMessage, AiService } from '../src/ai/chat.js';
+import type { AiConfig } from '../src/config.js';
+
+// Mocks below don't serve GET /models; the startup check has its own tests.
+process.env.AI_STARTUP_CHECK = 'false';
 import { loadProviders } from '../src/ai/providers.js';
 
 const cfgLimits = { maxInputChars: 100, maxHistoryChars: 250 };
@@ -119,7 +123,8 @@ describe('AI chat endpoint', () => {
     const r = await chat([{ role: 'user', content: 'hi' }]);
     const text = await r.text();
     mode = 'ok';
-    assert.match(text, /misconfigured/);
+    assert.match(text, /key rejected/);
+    assert.doesNotMatch(text, /limits/);
     assert.doesNotMatch(text, /sk-secret|sk-test-key/);
   });
 
@@ -310,4 +315,96 @@ test('a slow provider is abandoned for the next one', async () => {
   slow.closeAllConnections();
   app.server.close();
   slow.close();
+});
+
+test('failure messages only mention limits for real limits', () => {
+  assert.match(failureMessage([{ name: 'Groq', reason: 'rate limited' }], 60), /free AI limits.*Groq: rate limited.*60 seconds/);
+  const m = failureMessage([{ name: 'Groq', reason: 'key rejected' }, { name: 'Gemini', reason: 'rate limited' }]);
+  assert.doesNotMatch(m, /limits have been reached/);
+  assert.match(m, /Groq: key rejected/);
+  assert.match(m, /Gemini: rate limited/);
+});
+
+describe('startup provider check (GET /models, no quota used)', () => {
+  let mock: http.Server;
+  let port = 0;
+  const chatHits: Record<string, number> = {};
+  before(async () => {
+    mock = http.createServer((req, res) => {
+      const [, id, , what] = (req.url ?? '').split('/'); // /<id>/v1/<what>
+      if (what === 'models') {
+        if (id === 'badkey') { res.writeHead(401); return res.end('{"error":"invalid key"}'); }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ data: [{ id: 'new-model' }, { id: 'other' }] }));
+      }
+      chatHits[id!] = (chatHits[id!] ?? 0) + 1;
+      req.resume();
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\ndata: [DONE]\n\n`);
+    });
+    await new Promise<void>((r) => mock.listen(0, '127.0.0.1', () => r()));
+    port = (mock.address() as AddressInfo).port;
+  });
+  after(() => {
+    mock.closeAllConnections();
+    mock.close();
+  });
+
+  function cfg(providers: AiConfig['providers']): AiConfig {
+    return {
+      enabled: true, providers, strategy: 'priority', name: 'T', systemPrompt: 's', maxTokens: 100, temperature: 0.5,
+      timeoutMs: 10_000, attemptTimeoutMs: 5_000, maxInputChars: 1000, maxHistoryChars: 5000, requestsPerHour: 100,
+      maxConcurrent: 2, startupCheck: true,
+    };
+  }
+  const prov = (id: string, over: Partial<AiConfig['providers'][number]> = {}) => ({
+    id, name: id.toUpperCase(), baseUrl: `http://127.0.0.1:${port}/${id}/v1`, apiKey: 'k', model: 'old-model',
+    extraBody: {}, extraHeaders: {}, presetId: 'groq', explicitModel: false, preferred: ['missing', 'new-model'], ...over,
+  });
+
+  test('retired default models are swapped for an available one', async () => {
+    const svc = new AiService(cfg([prov('swap')]));
+    await svc.ready;
+    const st = svc.status();
+    assert.equal(st.providers[0]!.model, 'new-model');
+    assert.equal(st.providers[0]!.available, true);
+    svc.stop();
+  });
+
+  test('explicit models are never swapped; the problem is reported', async () => {
+    const svc = new AiService(cfg([prov('explicit', { explicitModel: true })]));
+    await svc.ready;
+    assert.deepEqual(
+      { issue: svc.status().providers[0]!.issue, available: svc.status().providers[0]!.available },
+      { issue: 'model not found', available: false },
+    );
+    svc.stop();
+  });
+
+  test('a rejected key is skipped and reported truthfully, not as a limit', async () => {
+    process.env.AI_STARTUP_CHECK = 'true';
+    process.env.AI_1_BASE_URL = `http://127.0.0.1:${port}/badkey/v1`;
+    process.env.AI_1_NAME = 'Bad';
+    process.env.AI_1_MODEL = 'new-model';
+    process.env.AI_2_BASE_URL = `http://127.0.0.1:${port}/good/v1`;
+    process.env.AI_2_NAME = 'Good';
+    process.env.AI_2_MODEL = 'new-model';
+    const app = createApp(loadConfig());
+    for (const k of ['AI_1_BASE_URL', 'AI_1_NAME', 'AI_1_MODEL', 'AI_2_BASE_URL', 'AI_2_NAME', 'AI_2_MODEL']) delete process.env[k];
+    process.env.AI_STARTUP_CHECK = 'false';
+    await new Promise<void>((r) => app.server.listen(0, '127.0.0.1', () => r()));
+    const b = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+    await new Promise((r) => setTimeout(r, 300)); // let the startup check finish
+    const st = await (await fetch(b + '/__px/ai/status')).json();
+    assert.deepEqual(st.providers.map((p: any) => [p.name, p.available, p.issue]), [['Bad', false, 'key rejected'], ['Good', true, null]]);
+    const text = await (await fetch(b + '/__px/ai/chat', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-px-req': '1' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })).text();
+    assert.match(text, /"p":"Good"/);
+    assert.equal(chatHits.badkey, undefined); // never wasted a request on the bad key
+    app.close();
+    app.server.closeAllConnections();
+    app.server.close();
+  });
 });

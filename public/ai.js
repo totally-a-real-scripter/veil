@@ -26,8 +26,42 @@
   var lastFocus = null;
 
   // ---------------------------------------------------------------- status
-  fetch('/__px/ai/status', { credentials: 'same-origin' })
-    .then(function (r) { return r.ok ? r.json() : null; })
+  var statusList = $('ai-status');
+  var ISSUE_TEXT = {
+    'rate limited': 'at its free limit, resting',
+    'out of free credits': 'out of free credits',
+    'key rejected': 'API key rejected',
+    'model not found': 'model not available',
+    'unreachable': 'server can\u2019t reach it',
+    'too slow': 'too slow, resting',
+    'provider error': 'having problems',
+    'request rejected': 'rejected a request',
+    'empty answer': 'returned an empty answer',
+  };
+  function renderStatus(s) {
+    if (!statusList || !s || !Array.isArray(s.providers)) return;
+    statusList.textContent = '';
+    if (s.providers.length < 2 && s.providers.every(function (p) { return p.available && !p.issue; })) return;
+    s.providers.forEach(function (p) {
+      var li = document.createElement('li');
+      var ok = p.available && !p.issue;
+      li.className = ok ? 'ok' : p.available ? 'warn' : 'bad';
+      var name = document.createElement('b');
+      name.textContent = p.name;
+      li.appendChild(name);
+      li.appendChild(document.createTextNode(ok ? ' ready' : ' \u2013 ' + (ISSUE_TEXT[p.issue] || (p.available ? 'recovering' : 'resting'))));
+      li.title = p.model;
+      statusList.appendChild(li);
+    });
+  }
+  function refreshStatus() {
+    return fetch('/__px/ai/status', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) { renderStatus(s); return s; })
+      .catch(function () { return null; });
+  }
+
+  refreshStatus()
     .then(function (s) {
       if (!s || !s.enabled) return;
       enabled = true;
@@ -48,8 +82,10 @@
   function open() {
     if (!enabled) return;
     if (panel.hidden) lastFocus = document.activeElement;
+    if (panel.hidden) refreshStatus();
     panel.hidden = false;
     body.classList.add('ai-open');
+    autosize(); // size correctly now that the panel is visible
     setTimeout(function () { input.focus(); }, 30);
   }
   function close() {
@@ -81,7 +117,7 @@
   // ---------------------------------------------------------------- composer
   function autosize() {
     input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+    if (input.scrollHeight > 0) input.style.height = Math.min(input.scrollHeight, 180) + 'px';
     sendBtn.disabled = !panel.classList.contains('busy') && !input.value.trim();
   }
   input.addEventListener('input', autosize);
@@ -238,6 +274,7 @@
       .then(function () {
         if (controller === ctrl) controller = null;
         setBusy(false);
+        refreshStatus();
       });
   }
 

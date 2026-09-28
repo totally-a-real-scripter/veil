@@ -36,6 +36,12 @@ export interface AiProvider {
   extraBody: Record<string, unknown>;
   /** Extra request headers (never secret). */
   extraHeaders: Record<string, string>;
+  /** Preset id this came from ("" for custom providers). */
+  presetId: string;
+  /** True when the operator set the model explicitly (never auto-substituted). */
+  explicitModel: boolean;
+  /** Fallback models, in preference order, if the default isn't offered. */
+  preferred: string[];
 }
 
 interface Preset {
@@ -44,6 +50,8 @@ interface Preset {
   modelEnv: string;
   baseUrl: string;
   model: string;
+  /** Alternatives tried (in order) if `model` isn't in the account's model list. */
+  preferred: string[];
 }
 
 export const PRESETS: Record<string, Preset> = {
@@ -54,6 +62,7 @@ export const PRESETS: Record<string, Preset> = {
     modelEnv: 'GROQ_MODEL',
     baseUrl: 'https://api.groq.com/openai/v1',
     model: 'llama-3.3-70b-versatile',
+    preferred: ['openai/gpt-oss-120b', 'llama-3.1-8b-instant', 'qwen/qwen3-32b', 'openai/gpt-oss-20b'],
   },
   // Very fast wafer-scale inference; large token budget per minute/day.
   cerebras: {
@@ -62,6 +71,7 @@ export const PRESETS: Record<string, Preset> = {
     modelEnv: 'CEREBRAS_MODEL',
     baseUrl: 'https://api.cerebras.ai/v1',
     model: 'gpt-oss-120b',
+    preferred: ['llama-3.3-70b', 'zai-glm-4.7', 'qwen-3-32b', 'llama3.1-8b'],
   },
   // Google AI Studio free tier (OpenAI-compatible endpoint).
   gemini: {
@@ -69,7 +79,9 @@ export const PRESETS: Record<string, Preset> = {
     keyEnv: 'GEMINI_API_KEY',
     modelEnv: 'GEMINI_MODEL',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    model: 'gemini-2.5-flash',
+    // "-latest" alias follows Google's current Flash model.
+    model: 'gemini-flash-latest',
+    preferred: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite', 'gemma-3-27b-it'],
   },
   // Mistral "Experiment" free plan; large monthly token allowance.
   mistral: {
@@ -78,6 +90,7 @@ export const PRESETS: Record<string, Preset> = {
     modelEnv: 'MISTRAL_MODEL',
     baseUrl: 'https://api.mistral.ai/v1',
     model: 'mistral-small-latest',
+    preferred: ['mistral-medium-latest', 'open-mistral-nemo', 'ministral-8b-latest'],
   },
   // Many ":free" models behind one key; low daily request cap, good last resort.
   openrouter: {
@@ -86,6 +99,7 @@ export const PRESETS: Record<string, Preset> = {
     modelEnv: 'OPENROUTER_MODEL',
     baseUrl: 'https://openrouter.ai/api/v1',
     model: 'meta-llama/llama-3.3-70b-instruct:free',
+    preferred: ['openai/gpt-oss-120b:free', 'deepseek/deepseek-chat-v3-0324:free', 'qwen/qwen3-coder:free', '*:free'],
   },
 };
 
@@ -111,10 +125,10 @@ function checkUrl(raw: string, label: string): string {
 }
 
 /** Request tweaks per model family, so reasoning models don't spend the whole token budget thinking. */
-function extrasFor(presetId: string, model: string): Record<string, unknown> {
-  const m = model.toLowerCase();
+export function extrasFor(presetId: string, model: string): Record<string, unknown> {
+  const m = model.toLowerCase().replace(/^openai\//, '');
   if ((presetId === 'groq' || presetId === 'cerebras') && m.startsWith('gpt-oss')) return { reasoning_effort: 'low' };
-  if (presetId === 'gemini' && /2\.5|thinking/.test(m)) return { reasoning_effort: 'low' };
+  if (presetId === 'gemini' && /2\.5|thinking|flash-latest/.test(m)) return { reasoning_effort: 'low' };
   return {};
 }
 
@@ -125,8 +139,12 @@ export function loadProviders(env: Env = process.env): AiProvider[] {
   for (const [id, p] of Object.entries(PRESETS)) {
     const key = val(env, p.keyEnv);
     if (!key) continue;
-    const model = val(env, p.modelEnv) || p.model;
+    const explicit = val(env, p.modelEnv);
+    const model = explicit || p.model;
     byId.set(id, {
+      presetId: id,
+      explicitModel: explicit !== '',
+      preferred: p.preferred,
       id,
       name: p.name,
       baseUrl: p.baseUrl,
@@ -143,6 +161,9 @@ export function loadProviders(env: Env = process.env): AiProvider[] {
     if (!/\/v1$/.test(base)) base += '/v1';
     byId.set('ollama', {
       id: 'ollama',
+      presetId: '',
+      explicitModel: true,
+      preferred: [],
       name: 'Ollama',
       baseUrl: base,
       apiKey: '',
@@ -159,6 +180,9 @@ export function loadProviders(env: Env = process.env): AiProvider[] {
     const baseUrl = checkUrl(base, `AI_${i}_BASE_URL`);
     byId.set(id, {
       id,
+      presetId: '',
+      explicitModel: true,
+      preferred: [],
       name: val(env, `AI_${i}_NAME`) || hostLabel(baseUrl),
       baseUrl,
       apiKey: val(env, `AI_${i}_API_KEY`),
@@ -175,6 +199,9 @@ export function loadProviders(env: Env = process.env): AiProvider[] {
     const baseUrl = checkUrl(legacy, 'AI_BASE_URL');
     byId.set('ai0', {
       id: 'ai0',
+      presetId: '',
+      explicitModel: true,
+      preferred: [],
       name: val(env, 'AI_PROVIDER_NAME') || hostLabel(baseUrl),
       baseUrl,
       apiKey: val(env, 'AI_API_KEY'),

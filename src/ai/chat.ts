@@ -26,7 +26,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AiConfig } from '../config.js';
-import type { AiProvider } from './providers.js';
+import { extrasFor, type AiProvider } from './providers.js';
 import { ConnectionCounter, RateLimiter } from '../security/limits.js';
 import { log } from '../util/log.js';
 
@@ -58,9 +58,16 @@ class Health {
   remainingMs(id: string, now = Date.now()): number {
     return Math.max(0, (this.until.get(id) ?? 0) - now);
   }
-  penalize(id: string, ms: number): void {
+  private readonly issue = new Map<string, string>();
+
+  penalize(id: string, ms: number, reason?: string): void {
+    if (reason) this.issue.set(id, reason);
     if (ms <= 0) return;
     this.until.set(id, Math.max(this.until.get(id) ?? 0, Date.now() + ms));
+  }
+  /** Why the provider last failed (null once it has succeeded since). */
+  lastIssue(id: string): string | null {
+    return this.issue.get(id) ?? null;
   }
   /** Rate-limit strike: back off 1, 2, 4 ... up to 60 minutes when no reset time is given. */
   strike(id: string): number {
@@ -71,6 +78,7 @@ class Health {
   success(id: string): void {
     this.strikes.delete(id);
     this.until.delete(id);
+    this.issue.delete(id);
   }
 }
 
@@ -78,15 +86,105 @@ export class AiService {
   private readonly quota: RateLimiter;
   private readonly slots: ConnectionCounter;
   private readonly health = new Health();
+  /** Runtime model per provider (the startup check may swap in an available one). */
+  private readonly models = new Map<string, string>();
+  /** Providers whose optional request tweaks were rejected; sent without them. */
+  private readonly noExtras = new Set<string>();
   private rr = 0;
+  /** Resolves when the startup check has finished (tests await it). */
+  readonly ready: Promise<void>;
 
   constructor(private readonly cfg: AiConfig) {
     // Bucket refills continuously to AI_REQUESTS_PER_HOUR per client.
     this.quota = new RateLimiter(cfg.requestsPerHour / 60, cfg.requestsPerHour);
     this.slots = new ConnectionCounter(cfg.maxConcurrent, 1);
+    this.ready = cfg.enabled && cfg.startupCheck ? this.checkProviders().catch(() => {}) : Promise.resolve();
   }
 
-  status(): { enabled: boolean; name: string; model: string; providers: { name: string; model: string; available: boolean }[] } {
+  private modelOf(p: AiProvider): string {
+    return this.models.get(p.id) ?? p.model;
+  }
+
+  private extrasOf(p: AiProvider): Record<string, unknown> {
+    if (this.noExtras.has(p.id)) return {};
+    return p.presetId ? extrasFor(p.presetId, this.modelOf(p)) : p.extraBody;
+  }
+
+  /**
+   * Verify every provider at startup WITHOUT spending free quota: list the
+   * account's models (GET /models). This catches wrong keys, retired model
+   * names and blocked network egress, logs a clear line per provider, and
+   * swaps in an available free model when a default has been retired.
+   */
+  async checkProviders(): Promise<void> {
+    await Promise.all(
+      this.cfg.providers.map(async (p) => {
+        const result = await this.checkOne(p);
+        const line = { provider: p.id, model: this.modelOf(p), ...result };
+        if (result.ok) log.info('ai provider ready', line);
+        else log.warn('ai provider problem', line);
+      }),
+    );
+  }
+
+  private async checkOne(p: AiProvider): Promise<{ ok: boolean; issue?: string; hint?: string }> {
+    let res: Response;
+    try {
+      res = await fetch(`${p.baseUrl}/models`, {
+        headers: { ...p.extraHeaders, ...(p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}) },
+        signal: AbortSignal.timeout(10_000),
+        redirect: 'error',
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err);
+      this.health.penalize(p.id, 0, 'unreachable');
+      return { ok: false, issue: 'unreachable', hint: `The server could not connect to ${new URL(p.baseUrl).host} (${msg}). Check the server's outbound internet access/DNS.` };
+    }
+    if (res.status === 401 || res.status === 403) {
+      await res.body?.cancel().catch(() => {});
+      // A bad key won't fix itself until the settings change (redeploy).
+      this.health.penalize(p.id, 24 * 60 * MIN, 'key rejected');
+      return { ok: false, issue: 'key rejected', hint: 'The API key was rejected. Re-copy it (no quotes or spaces) into the environment variable and redeploy.' };
+    }
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { ok: true, hint: `Could not list models (HTTP ${res.status}); will find out on first use.` };
+    }
+    let ids: string[] = [];
+    try {
+      const json = (await res.json()) as { data?: { id?: unknown }[]; models?: { name?: unknown }[] };
+      const list = json.data ?? json.models ?? [];
+      ids = list
+        .map((m) => String((m as { id?: unknown }).id ?? (m as { name?: unknown }).name ?? ''))
+        .map((id) => id.replace(/^models\//, ''))
+        .filter(Boolean);
+    } catch {
+      return { ok: true, hint: 'Model list was unreadable; will find out on first use.' };
+    }
+    if (ids.length === 0) return { ok: true };
+    const model = this.modelOf(p);
+    const has = (m: string) => ids.includes(m) || ids.includes(m.replace(/:latest$/, ''));
+    if (has(model) || (p.id === 'ollama' && ids.some((i) => i.startsWith(model.split(':')[0]! + ':')))) return { ok: true };
+
+    const sample = ids.filter((i) => !p.presetId || p.presetId !== 'openrouter' || i.endsWith(':free')).slice(0, 12).join(', ');
+    if (!p.explicitModel) {
+      const pick = p.preferred.map((m) => (m === '*:free' ? ids.find((i) => i.endsWith(':free')) : has(m) ? m : undefined)).find(Boolean);
+      if (pick) {
+        this.models.set(p.id, pick);
+        return { ok: true, hint: `Default model "${model}" isn't offered anymore; using "${pick}" instead.` };
+      }
+    }
+    this.health.penalize(p.id, 24 * 60 * MIN, 'model not found');
+    const fix = p.id === 'ollama' ? `Run "ollama pull ${model}" on the Ollama server.` : `Set a model your account has, e.g. one of: ${sample}`;
+    return { ok: false, issue: 'model not found', hint: `Model "${model}" isn't available. ${fix}` };
+  }
+
+  status(): {
+    enabled: boolean;
+    name: string;
+    model: string;
+    providers: { name: string; model: string; available: boolean; issue: string | null }[];
+  } {
     const ps = this.cfg.enabled ? this.cfg.providers : [];
     const model =
       ps.length === 0 ? '' : ps.length === 1 ? `${ps[0]!.name} · ${ps[0]!.model}` : `Auto · ${ps.length} providers`;
@@ -94,7 +192,12 @@ export class AiService {
       enabled: this.cfg.enabled,
       name: this.cfg.name,
       model,
-      providers: ps.map((p) => ({ name: p.name, model: p.model, available: this.health.available(p.id) })),
+      providers: ps.map((p) => ({
+        name: p.name,
+        model: this.modelOf(p),
+        available: this.health.available(p.id),
+        issue: this.health.lastIssue(p.id),
+      })),
     };
   }
 
@@ -156,10 +259,11 @@ export class AiService {
       const plan = this.plan();
       if (plan.length === 0) {
         const soonest = Math.min(...this.cfg.providers.map((p) => this.health.remainingMs(p.id)));
-        emit({ error: `All AI providers are at their free limits right now. Try again in about ${formatWait(Math.ceil(soonest / 1000))}.` });
+        const issues = this.cfg.providers.map((p) => ({ name: p.name, reason: this.health.lastIssue(p.id) ?? 'resting' }));
+        emit({ error: failureMessage(issues, Math.ceil(soonest / 1000)) });
         return;
       }
-      let lastReason = '';
+      const tried: { name: string; reason: string }[] = [];
       for (const provider of plan) {
         if (overall.signal.aborted) break;
         const r = await this.attempt(provider, messages, overall.signal, emit);
@@ -172,8 +276,8 @@ export class AiService {
           if (r.kind === 'partial') this.health.penalize(provider.id, 30_000);
           break;
         }
-        this.health.penalize(provider.id, r.cooldownMs);
-        lastReason = r.reason;
+        this.health.penalize(provider.id, r.cooldownMs, category(r.reason));
+        tried.push({ name: provider.name, reason: category(r.reason) });
         log.warn('ai provider failed, trying next', {
           provider: provider.id,
           reason: r.reason,
@@ -186,7 +290,7 @@ export class AiService {
         }
         return;
       }
-      if (lastReason) emit({ error: userMessage(lastReason) });
+      if (tried.length) emit({ error: failureMessage(tried) });
     } finally {
       clearTimeout(timer);
       release();
@@ -220,12 +324,12 @@ export class AiService {
           ...(p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}),
         },
         body: JSON.stringify({
-          model: p.model,
+          model: this.modelOf(p),
           stream: true,
           max_tokens: this.cfg.maxTokens,
           temperature: this.cfg.temperature,
           messages: [{ role: 'system', content: this.cfg.systemPrompt }, ...messages],
-          ...p.extraBody,
+          ...this.extrasOf(p),
         }),
         signal: ctrl.signal,
         redirect: 'error',
@@ -233,6 +337,15 @@ export class AiService {
 
       if (!res.ok || !res.body) {
         const detail = (await res.text().catch(() => '')).slice(0, 300);
+        log.warn('ai provider error response', { provider: p.id, status: res.status, detail });
+        // Some models reject our optional tweaks (e.g. reasoning_effort):
+        // retry right away without them, and remember that.
+        if ((res.status === 400 || res.status === 422) && Object.keys(this.extrasOf(p)).length > 0 && !this.noExtras.has(p.id)) {
+          this.noExtras.add(p.id);
+          clearTimeout(firstToken);
+          overall.removeEventListener('abort', onAbort);
+          return this.attempt(p, messages, overall, emit);
+        }
         return { kind: 'fail', ...classify(res.status, res.headers, detail, this.health, p.id) };
       }
 
@@ -241,7 +354,7 @@ export class AiService {
         if (!started) {
           started = true;
           clearTimeout(firstToken);
-          emit({ p: p.name, m: p.model });
+          emit({ p: p.name, m: this.modelOf(p) });
         }
         produced += delta.length;
         if (produced > MAX_OUTPUT_CHARS) {
@@ -261,6 +374,7 @@ export class AiService {
         return { kind: 'partial' };
       }
       const slow = String(ctrl.signal.reason ?? '').includes('slow');
+      log.warn('ai provider request failed', { provider: p.id, err: err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err) });
       return {
         kind: 'fail',
         cooldownMs: slow ? 2 * MIN : 30_000,
@@ -338,17 +452,34 @@ function clampReset(ms: number): number {
   return Math.min(Math.max(ms, 1_000), 24 * 60 * MIN);
 }
 
-function userMessage(reason: string): string {
-  if (reason.startsWith('rate limited') || reason.startsWith('out of credits')) {
-    return 'The free AI limits have been reached for now. Please try again in a few minutes.';
-  }
-  if (reason.startsWith('key rejected') || reason.startsWith('model not found')) {
-    return 'The AI service is misconfigured. The site owner needs to check the AI settings.';
-  }
-  if (reason.startsWith('request too large')) return 'This conversation is too long for the AI. Start a new chat.';
-  if (reason === 'no response in time') return 'The AI took too long to respond. Please try again.';
-  return 'Could not get an answer from the AI service. Please try again shortly.';
+/** Short, user-safe category for a failure reason. */
+function category(reason: string): string {
+  if (reason.startsWith('rate limited')) return 'rate limited';
+  if (reason.startsWith('out of credits')) return 'out of free credits';
+  if (reason.startsWith('key rejected')) return 'key rejected';
+  if (reason.startsWith('model not found')) return 'model not found';
+  if (reason.startsWith('request too large')) return 'conversation too long';
+  if (reason === 'no response in time') return 'too slow';
+  if (reason.startsWith('network')) return 'unreachable';
+  if (reason.startsWith('server error')) return 'provider error';
+  if (reason === 'empty answer') return 'empty answer';
+  if (reason.startsWith('rejected request')) return 'request rejected';
+  return 'error';
 }
+
+/**
+ * Tell the visitor what actually happened. Only genuine rate/credit limits
+ * are described as "limits"; configuration or network problems say so.
+ */
+export function failureMessage(issues: { name: string; reason: string }[], retryInSeconds?: number): string {
+  const limited = (r: string) => r === 'rate limited' || r === 'out of free credits' || r === 'too slow' || r === 'resting';
+  const detail = issues.map((i) => `${i.name}: ${i.reason}`).join(' \u00b7 ');
+  const when = retryInSeconds && retryInSeconds > 0 ? ` Try again in about ${formatWait(retryInSeconds)}.` : ' Please try again shortly.';
+  if (issues.every((i) => i.reason === 'conversation too long')) return 'This conversation is too long for the AI. Start a new chat.';
+  if (issues.every((i) => limited(i.reason))) return `The free AI limits have been reached for now (${detail}).${when}`;
+  return `The AI couldn't answer (${detail}). The site owner can see details in the server log.${when}`;
+}
+
 
 /** Parse an OpenAI-style SSE stream and yield the text deltas. */
 export async function* streamDeltas(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {

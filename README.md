@@ -311,6 +311,28 @@ docker compose exec ollama ollama pull llama3.2:3b     # one-time model download
 2. Deploy it, open its **Terminal**, and run `ollama pull llama3.2:3b`.
 3. On the Veil resource, set `OLLAMA_BASE_URL=http://<ollama container or service name>:11434` and redeploy. If Veil can't reach it, enable **Connect to predefined network** on both resources (the name varies by Coolify version).
 
+### Troubleshooting the AI
+
+At startup Veil checks every provider by listing its models (`GET /models`), which **doesn't use any free quota**. It writes one line per provider to the server log (in Coolify: the resource's **Logs** tab):
+
+```
+{"msg":"ai provider ready","provider":"groq","model":"llama-3.3-70b-versatile","ok":true}
+{"msg":"ai provider problem","provider":"gemini","issue":"key rejected","hint":"The API key was rejected. Re-copy it ..."}
+```
+
+The chat panel also shows each provider's status (ready, or what's wrong), and error messages name the provider and the reason.
+
+| Status | Meaning | Fix |
+|---|---|---|
+| API key rejected | The provider refused the key; it's never called again until you redeploy | Re-copy the key into the variable with no quotes or spaces, save, **redeploy** |
+| model not available | Your account doesn't offer that model | If you didn't set `*_MODEL`, Veil switches to an available free model automatically; otherwise pick one from the list in the log `hint` |
+| server can't reach it | The server couldn't connect (DNS, firewall, no outbound internet) | Check the server's outbound access; the `hint` has the exact network error |
+| at its free limit, resting | Real rate or quota limit | Wait, or add more providers |
+
+Coolify notes:
+- Environment variables must be saved and the resource **redeployed** before they take effect.
+- Don't tick "Build Variable" for API keys; they're needed at runtime.
+
 ### Limits and safety
 - API keys and URLs stay on the server. The browser only sees provider names, models and whether each is currently available.
 - Per-visitor quota (`AI_REQUESTS_PER_HOUR`, default 60), one answer at a time per visitor, `AI_MAX_CONCURRENT` answers overall, message and history size limits, a timeout, and a cap on answer length.
