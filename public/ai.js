@@ -190,6 +190,7 @@
       body.classList.add('ai-dragging');
       panel.style.transform = 'translate3d(' + dx + 'px,0,0)';
       $('main-view').style.transform = 'translate3d(' + (-22 + (dx / window.innerWidth) * 22) + '%,0,0)';
+      $('main-view').style.opacity = String(Math.min(1, dx / (window.innerWidth * 0.6)));
     }, { passive: true });
     function end() {
       if (!tracking) return;
@@ -197,6 +198,7 @@
       body.classList.remove('ai-dragging');
       panel.style.transform = '';
       $('main-view').style.transform = '';
+      $('main-view').style.opacity = '';
       if (dx > window.innerWidth * 0.3) close();
     }
     panel.addEventListener('touchend', end);
