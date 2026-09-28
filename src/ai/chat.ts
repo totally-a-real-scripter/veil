@@ -24,6 +24,7 @@
  *    server-side. Upstream error bodies are never relayed (they can contain
  *    account details); users get a generic message and operators get a log line.
  */
+import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AiConfig } from '../config.js';
 import { extrasFor, type AiProvider } from './providers.js';
@@ -46,6 +47,55 @@ type Attempt =
   | { kind: 'fail'; cooldownMs: number; reason: string }
   | { kind: 'partial' } // failed after text was already sent
   | { kind: 'aborted' };
+
+/**
+ * Answers to identical *first* questions (no prior conversation) are reused
+ * for a while, so popular questions and the suggestion buttons cost one API
+ * call instead of one per visitor. Follow-ups are never cached because their
+ * meaning depends on the conversation. Bounded LRU, in memory only.
+ */
+export class AnswerCache {
+  private readonly map = new Map<string, { text: string; provider: string; model: string; at: number }>();
+  constructor(
+    private readonly ttlMs: number,
+    private readonly max: number,
+  ) {}
+
+  static key(messages: ChatMessage[], systemPrompt: string): string | null {
+    if (messages.length !== 1 || messages[0]!.role !== 'user') return null;
+    const q = messages[0]!.content.toLowerCase().replace(/\s+/g, ' ').replace(/[\s?!.]+$/, '').trim();
+    if (q.length < 2 || q.length > 500) return null;
+    return createHash('sha256').update(systemPrompt).update('\0').update(q).digest('hex');
+  }
+
+  get(key: string | null) {
+    if (!key || this.ttlMs <= 0) return undefined;
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.at > this.ttlMs) {
+      this.map.delete(key);
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, hit); // LRU refresh
+    return hit;
+  }
+
+  set(key: string | null, text: string, provider: string, model: string): void {
+    if (!key || this.ttlMs <= 0 || this.max <= 0 || !text || text.length > 20_000) return;
+    this.map.delete(key);
+    this.map.set(key, { text, provider, model, at: Date.now() });
+    while (this.map.size > this.max) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+}
 
 /** Per-provider health: cooldown deadline and consecutive rate-limit strikes. */
 class Health {
@@ -86,6 +136,9 @@ export class AiService {
   private readonly quota: RateLimiter;
   private readonly slots: ConnectionCounter;
   private readonly health = new Health();
+  private readonly cache: AnswerCache;
+  /** Upstream chat calls made (exposed for tests / monitoring). */
+  apiCalls = 0;
   /** Runtime model per provider (the startup check may swap in an available one). */
   private readonly models = new Map<string, string>();
   /** Providers whose optional request tweaks were rejected; sent without them. */
@@ -98,6 +151,7 @@ export class AiService {
     // Bucket refills continuously to AI_REQUESTS_PER_HOUR per client.
     this.quota = new RateLimiter(cfg.requestsPerHour / 60, cfg.requestsPerHour);
     this.slots = new ConnectionCounter(cfg.maxConcurrent, 1);
+    this.cache = new AnswerCache(cfg.cacheTtlMs, cfg.cacheMaxEntries);
     this.ready = cfg.enabled && cfg.startupCheck ? this.checkProviders().catch(() => {}) : Promise.resolve();
   }
 
@@ -223,17 +277,28 @@ export class AiService {
   async handleChat(req: IncomingMessage, res: ServerResponse, clientKey: string): Promise<void> {
     if (!this.cfg.enabled) return sendJson(res, 404, { error: 'The AI assistant is not configured on this server.' });
 
-    const wait = this.quota.take(clientKey);
-    if (wait > 0) {
-      res.setHeader('retry-after', String(wait));
-      return sendJson(res, 429, { error: `You've reached the AI message limit. Try again in about ${formatWait(wait)}.` });
-    }
-
     let messages: ChatMessage[];
     try {
       messages = validateMessages(await readJson(req), this.cfg);
     } catch (err) {
       return sendJson(res, 400, { error: err instanceof Error ? err.message : 'Invalid request.' });
+    }
+
+    // Saved answer: no API call, and it doesn't count against the visitor's quota.
+    const cacheKey = AnswerCache.key(messages, this.cfg.systemPrompt);
+    const cached = this.cache.get(cacheKey);
+    if (cached) {
+      res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      res.write(JSON.stringify({ p: cached.provider, m: cached.model, cached: true }) + '\n');
+      res.write(JSON.stringify({ t: cached.text }) + '\n');
+      res.end(JSON.stringify({ done: true }) + '\n');
+      return;
+    }
+
+    const wait = this.quota.take(clientKey);
+    if (wait > 0) {
+      res.setHeader('retry-after', String(wait));
+      return sendJson(res, 429, { error: `You've reached the AI message limit. Try again in about ${formatWait(wait)}.` });
     }
 
     const release = this.slots.tryAcquire(clientKey);
@@ -266,9 +331,16 @@ export class AiService {
       const tried: { name: string; reason: string }[] = [];
       for (const provider of plan) {
         if (overall.signal.aborted) break;
-        const r = await this.attempt(provider, messages, overall.signal, emit);
+        let text = '';
+        const capture = (o: unknown) => {
+          const t = (o as { t?: unknown }).t;
+          if (typeof t === 'string') text += t;
+          emit(o);
+        };
+        const r = await this.attempt(provider, messages, overall.signal, capture);
         if (r.kind === 'ok') {
           this.health.success(provider.id);
+          this.cache.set(cacheKey, text, provider.name, this.modelOf(provider));
           emit({ done: true });
           return;
         }
@@ -315,6 +387,7 @@ export class AiService {
     }, this.cfg.attemptTimeoutMs);
 
     try {
+      this.apiCalls++;
       const res = await fetch(`${p.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -508,7 +581,10 @@ export async function* streamDeltas(body: ReadableStream<Uint8Array>): AsyncGene
   }
 }
 
-export function validateMessages(body: unknown, cfg: Pick<AiConfig, 'maxInputChars' | 'maxHistoryChars'>): ChatMessage[] {
+export function validateMessages(
+  body: unknown,
+  cfg: Pick<AiConfig, 'maxInputChars' | 'maxHistoryChars'> & Partial<Pick<AiConfig, 'maxHistoryMessages'>>,
+): ChatMessage[] {
   if (!body || typeof body !== 'object' || !Array.isArray((body as { messages?: unknown }).messages)) {
     throw new Error('Expected a list of messages.');
   }
@@ -534,7 +610,8 @@ export function validateMessages(body: unknown, cfg: Pick<AiConfig, 'maxInputCha
   // Keep the most recent history that fits the budget (always keep the last message).
   const kept: ChatMessage[] = [];
   let total = 0;
-  for (let i = msgs.length - 1; i >= 0 && kept.length < MAX_MESSAGES; i--) {
+  const maxKept = Math.min(MAX_MESSAGES, cfg.maxHistoryMessages ?? MAX_MESSAGES);
+  for (let i = msgs.length - 1; i >= 0 && kept.length < maxKept; i--) {
     const m = msgs[i]!;
     const len = Math.min(m.content.length, cfg.maxInputChars * 4);
     if (kept.length > 0 && total + len > cfg.maxHistoryChars) break;

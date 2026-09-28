@@ -249,7 +249,7 @@ Sessions are kept in memory, so keep the resource at **one replica** (the defaul
 
 ## AI assistant
 
-Veil includes a chat assistant: the **Ask AI** button on the home screen, the sparkle button in the browsing toolbar, **Ctrl+J** anywhere, or **Ctrl+Enter** in the search box to send what you typed. Answers stream in live with formatting, code blocks and copy buttons. Links in answers open through the proxy, and each answer shows which provider wrote it.
+Veil includes a chat assistant on its own page at **`/ai`**. Open it with the **Ask AI** button on the home screen, the sparkle button in the browsing toolbar, **Ctrl+J** anywhere, or **Ctrl+Enter** in the search box to send what you typed. The AI page slides in from the right; the back arrow, **Esc**, the browser's Back button or a swipe from the left edge on touch screens slide back to browsing. The page you were browsing stays loaded underneath, so you return exactly where you left off. Answers stream in live with formatting, code blocks and copy buttons. Links in answers open through the proxy, and each answer shows which provider wrote it.
 
 ### Multiple free providers with automatic failover
 
@@ -310,6 +310,20 @@ docker compose exec ollama ollama pull llama3.2:3b     # one-time model download
    - Add persistent storage at `/root/.ollama`.
 2. Deploy it, open its **Terminal**, and run `ollama pull llama3.2:3b`.
 3. On the Veil resource, set `OLLAMA_BASE_URL=http://<ollama container or service name>:11434` and redeploy. If Veil can't reach it, enable **Connect to predefined network** on both resources (the name varies by Coolify version).
+
+### Keeping API usage low
+
+Veil is tuned to make as few, and as small, API calls as possible:
+
+- **Saved answers:** when a visitor's first question matches one already answered (ignoring case, spacing and trailing punctuation), the saved answer is shown instantly with **no API call** and it doesn't count toward their quota. The suggestion buttons benefit most. Follow-up questions are never reused, since they depend on the conversation. Answers are kept for `AI_CACHE_TTL_MINUTES` (default 24 h), in memory only; set it to `0` to turn this off.
+- **Short context:** only the last `AI_MAX_HISTORY_MESSAGES` (12) messages and `AI_MAX_HISTORY_CHARS` (8,000) characters of a conversation are sent, so long chats don't resend everything.
+- **Concise by default:** a short system prompt asks for brief answers, and `AI_MAX_TOKENS` (1024) caps answer length. Reasoning models are asked to think briefly.
+- **No wasted calls:**
+  - Stop, closing the panel or leaving the page cancels the request immediately.
+  - Failover only calls the next provider after a failure.
+  - Providers with a bad key or missing model are skipped, not retried.
+  - The startup check lists models, which costs no quota.
+- **Per-visitor cap:** `AI_REQUESTS_PER_HOUR` (30), one answer at a time.
 
 ### Troubleshooting the AI
 

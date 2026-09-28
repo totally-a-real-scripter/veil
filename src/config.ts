@@ -27,6 +27,11 @@ export interface AiConfig {
   maxConcurrent: number;
   /** Verify keys/models at startup via GET /models (uses no quota). */
   startupCheck: boolean;
+  /** Only the most recent N messages are sent (fewer tokens per request). */
+  maxHistoryMessages: number;
+  /** Reuse answers to identical first questions for this long (0 = off). */
+  cacheTtlMs: number;
+  cacheMaxEntries: number;
 }
 
 export type IsolationMode = 'compat' | 'sandbox';
@@ -148,11 +153,11 @@ function publicHostnames(): string[] {
   return [...names];
 }
 
+// Kept short on purpose: the system prompt is sent with every request.
 const DEFAULT_SYSTEM_PROMPT =
-  'You are {name}, a helpful, concise assistant built into Veil, a private web browsing app. ' +
-  'Answer clearly and accurately, and use Markdown (lists, **bold**, `code`, fenced code blocks) when it helps. ' +
-  'You cannot browse the web or see the page the user has open; if a question needs current information, say so ' +
-  'and suggest what they could search for. If you are unsure, say that instead of guessing.';
+  'You are {name}, the assistant in Veil, a private web browser. Be accurate and concise: ' +
+  'answer in a few sentences unless asked for detail. Use Markdown when it helps. ' +
+  "You can't browse the web; for current events, say so and suggest a search. If unsure, say so.";
 
 function loadAiConfig(): AiConfig {
   const providers = loadProviders();
@@ -167,15 +172,18 @@ function loadAiConfig(): AiConfig {
     strategy,
     name,
     systemPrompt: str('AI_SYSTEM_PROMPT', DEFAULT_SYSTEM_PROMPT).replace(/\{name\}/g, name),
-    maxTokens: int('AI_MAX_TOKENS', 2048, 16, 32_768),
+    maxTokens: int('AI_MAX_TOKENS', 1024, 16, 32_768),
     temperature,
     timeoutMs: int('AI_TIMEOUT_MS', 120_000, 5_000, 600_000),
     attemptTimeoutMs: int('AI_ATTEMPT_TIMEOUT_MS', 20_000, 1_000, 300_000),
     maxInputChars: int('AI_MAX_INPUT_CHARS', 4_000, 100, 100_000),
-    maxHistoryChars: int('AI_MAX_HISTORY_CHARS', 16_000, 500, 1_000_000),
-    requestsPerHour: int('AI_REQUESTS_PER_HOUR', 60, 1, 100_000),
+    maxHistoryChars: int('AI_MAX_HISTORY_CHARS', 8_000, 500, 1_000_000),
+    maxHistoryMessages: int('AI_MAX_HISTORY_MESSAGES', 12, 1, 200),
+    requestsPerHour: int('AI_REQUESTS_PER_HOUR', 30, 1, 100_000),
     maxConcurrent: int('AI_MAX_CONCURRENT', 4, 1, 1_000),
     startupCheck: bool('AI_STARTUP_CHECK', true),
+    cacheTtlMs: int('AI_CACHE_TTL_MINUTES', 1440, 0, 60 * 24 * 30) * 60_000,
+    cacheMaxEntries: int('AI_CACHE_MAX_ENTRIES', 500, 0, 100_000),
   };
 }
 

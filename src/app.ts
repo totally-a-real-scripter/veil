@@ -74,6 +74,9 @@ function loadStatic(): Map<string, StaticFile> {
     map.set(route, { body: readFileSync(path.join(PUBLIC_DIR, file)), type, cache });
   }
   map.set('/__px/', map.get('/')!);
+  // The AI page is a client-side view of the same app shell.
+  map.set('/ai', map.get('/')!);
+  map.set('/ai/', map.get('/')!);
   map.set('/favicon.ico', map.get('/__px/static/favicon.svg')!);
   map.set('/robots.txt', { body: Buffer.from('User-agent: *\nDisallow: /\n'), type: 'text/plain; charset=utf-8', cache: 'public, max-age=86400' });
   return map;

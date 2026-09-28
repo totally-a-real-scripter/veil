@@ -10,8 +10,9 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var body = document.body;
-  var panel = $('ai-panel');
-  var logEl = $('ai-log');
+  var panel = $('ai-view'); // the AI page
+  var logEl = $('ai-log'); // scroll container
+  var thread = $('ai-thread'); // messages
   var empty = $('ai-empty');
   var form = $('ai-form');
   var input = $('ai-input');
@@ -63,7 +64,14 @@
 
   refreshStatus()
     .then(function (s) {
-      if (!s || !s.enabled) return;
+      if (!s || !s.enabled) {
+        // Arrived on /ai but the assistant isn't configured: say so instead of a dead page.
+        $('ai-off').hidden = false;
+        input.disabled = true;
+        input.placeholder = 'AI is not available';
+        Array.prototype.forEach.call(document.querySelectorAll('[data-prompt]'), function (b) { b.disabled = true; });
+        return;
+      }
       enabled = true;
       $('ai-name').textContent = s.name || 'AI';
       $('ai-model').textContent = s.model || '';
@@ -78,38 +86,126 @@
     })
     .catch(function () {});
 
-  // ---------------------------------------------------------------- open/close
-  function open() {
-    if (!enabled) return;
-    if (panel.hidden) lastFocus = document.activeElement;
-    if (panel.hidden) refreshStatus();
-    panel.hidden = false;
+  // ---------------------------------------------------------------- page navigation
+  // The AI is its own page at /ai. Navigating there pushes a history entry, so
+  // the browser's Back button (and the in-page back arrow, Esc, or a swipe)
+  // slide back to browsing. The browsing view stays mounted underneath, so the
+  // proxied page keeps its state.
+  var AI_PATH = '/ai';
+  function isAiUrl() { return location.pathname === AI_PATH || location.pathname === AI_PATH + '/'; }
+  function isOpen() { return body.classList.contains('ai-open'); }
+
+  function show(animate) {
+    if (isOpen()) return;
+    lastFocus = document.activeElement;
+    if (!animate) body.classList.add('no-anim');
+    body.classList.remove('ai-leaving');
     body.classList.add('ai-open');
-    autosize(); // size correctly now that the panel is visible
-    setTimeout(function () { input.focus(); }, 30);
+    panel.setAttribute('aria-hidden', 'false');
+    $('main-view').setAttribute('aria-hidden', 'true');
+    document.title = ($('ai-name').textContent || 'AI') + ' – Veil';
+    refreshStatus();
+    autosize();
+    if (!animate) requestAnimationFrame(function () { requestAnimationFrame(function () { body.classList.remove('no-anim'); }); });
+    setTimeout(function () { if (!input.disabled) input.focus({ preventScroll: true }); }, animate ? 380 : 30);
   }
-  function close() {
-    panel.hidden = true;
+
+  function hide() {
+    if (!isOpen()) return;
+    body.classList.add('ai-leaving'); // keep the background visible until the slide ends
     body.classList.remove('ai-open');
-    if (lastFocus && lastFocus.focus) lastFocus.focus();
+    panel.setAttribute('aria-hidden', 'true');
+    $('main-view').removeAttribute('aria-hidden');
+    setTimeout(function () { body.classList.remove('ai-leaving'); }, 520);
+    if (window.Veil && window.Veil.restoreTitle) window.Veil.restoreTitle();
+    if (lastFocus && lastFocus.focus && lastFocus !== document.body) lastFocus.focus({ preventScroll: true });
   }
-  function toggle() { panel.hidden ? open() : close(); }
+
+  /** Go to the AI page (adds a history entry). */
+  function open() {
+    if (isOpen()) { input.focus(); return; }
+    history.pushState({ veilAi: true }, '', AI_PATH);
+    show(true);
+  }
+
+  /** Leave the AI page, preferring a real history step so Back/Forward stay in sync. */
+  function close() {
+    if (!isOpen()) return;
+    if (history.state && history.state.veilAi) {
+      history.back(); // popstate below performs the slide
+    } else {
+      // Landed directly on /ai: there's no earlier entry to go back to.
+      history.replaceState(null, '', window.Veil && window.Veil.mainUrl ? window.Veil.mainUrl() : '/');
+      hide();
+    }
+  }
+  function toggle() { isOpen() ? close() : open(); }
+
+  var afterClose = null;
+  function closeThen(fn) {
+    if (!isOpen()) { fn(); return; }
+    afterClose = fn;
+    close();
+    if (!isOpen() && afterClose) { var f = afterClose; afterClose = null; f(); } // replaceState path
+  }
+
+  window.addEventListener('popstate', function () {
+    if (isAiUrl()) show(true);
+    else {
+      hide();
+      if (afterClose) { var f = afterClose; afterClose = null; f(); }
+    }
+  });
 
   fab.addEventListener('click', open);
   toolbarBtn.addEventListener('click', toggle);
-  $('ai-close').addEventListener('click', close);
+  $('ai-back').addEventListener('click', close);
   $('ai-new').addEventListener('click', function () {
     stop();
     messages = [];
-    Array.prototype.slice.call(logEl.querySelectorAll('.msg')).forEach(function (n) { n.remove(); });
+    thread.textContent = '';
     empty.hidden = false;
+    logEl.scrollTop = 0;
     input.focus();
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !panel.hidden) { e.preventDefault(); close(); }
-    // Ctrl/Cmd + J toggles the assistant.
+    if (e.key === 'Escape' && isOpen() && !e.defaultPrevented) { e.preventDefault(); close(); }
+    // Ctrl/Cmd + J toggles the AI page.
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j' && enabled) { e.preventDefault(); toggle(); }
   });
+
+  // Swipe right from the left edge to go back (touch screens).
+  (function swipeBack() {
+    var startX = 0, startY = 0, dx = 0, tracking = false;
+    panel.addEventListener('touchstart', function (e) {
+      var t = e.touches[0];
+      if (!isOpen() || e.touches.length !== 1 || t.clientX > 32) return;
+      tracking = true; startX = t.clientX; startY = t.clientY; dx = 0;
+    }, { passive: true });
+    panel.addEventListener('touchmove', function (e) {
+      if (!tracking) return;
+      var t = e.touches[0];
+      dx = Math.max(0, t.clientX - startX);
+      if (Math.abs(t.clientY - startY) > dx && dx < 12) { tracking = false; return; } // vertical scroll
+      body.classList.add('ai-dragging');
+      panel.style.transform = 'translate3d(' + dx + 'px,0,0)';
+      $('main-view').style.transform = 'translate3d(' + (-22 + (dx / window.innerWidth) * 22) + '%,0,0)';
+    }, { passive: true });
+    function end() {
+      if (!tracking) return;
+      tracking = false;
+      body.classList.remove('ai-dragging');
+      panel.style.transform = '';
+      $('main-view').style.transform = '';
+      if (dx > window.innerWidth * 0.3) close();
+    }
+    panel.addEventListener('touchend', end);
+    panel.addEventListener('touchcancel', end);
+  })();
+
+  // Opening the app directly at /ai shows the AI page immediately.
+  if (isAiUrl()) show(false);
+
   Array.prototype.forEach.call(document.querySelectorAll('[data-prompt]'), function (b) {
     b.addEventListener('click', function () { ask(b.getAttribute('data-prompt')); });
   });
@@ -156,7 +252,7 @@
     bubble.className = 'bubble';
     if (role === 'user') bubble.textContent = text;
     row.appendChild(bubble);
-    logEl.appendChild(row);
+    thread.appendChild(row);
     scrollDown(true);
     return { row: row, bubble: bubble };
   }
@@ -241,7 +337,7 @@
               if (!line) continue;
               var ev;
               try { ev = JSON.parse(line); } catch (e) { continue; }
-              if (typeof ev.p === 'string') source = ev.p + (typeof ev.m === 'string' ? ' \u00b7 ' + ev.m : '');
+              if (typeof ev.p === 'string') source = ev.p + (typeof ev.m === 'string' ? ' \u00b7 ' + ev.m : '') + (ev.cached ? ' \u00b7 saved answer' : '');
               if (typeof ev.t === 'string') { answer += ev.t; schedule(); }
               if (ev.error) failure = ev.error;
             }
@@ -287,7 +383,7 @@
     if (canRetry) {
       var question = null;
       // The failed question is the last user bubble.
-      var users = logEl.querySelectorAll('.msg.user .bubble');
+      var users = thread.querySelectorAll('.msg.user .bubble');
       if (users.length) question = users[users.length - 1].textContent;
       var retry = document.createElement('button');
       retry.type = 'button';
@@ -440,8 +536,9 @@
     a.addEventListener('click', function (e) {
       if (e.ctrlKey || e.metaKey || e.shiftKey) return;
       e.preventDefault();
-      if (window.Veil && window.Veil.go) window.Veil.go(u);
-      if (window.innerWidth <= 640) close();
+      // Slide back to browsing first, then load the link there. (Loading it
+      // first would add a history entry that Back would then undo.)
+      closeThen(function () { if (window.Veil && window.Veil.go) window.Veil.go(u); });
     });
     return a;
   }

@@ -13,6 +13,13 @@
   var toastEl = $('toast');
 
   var current = null; // real URL currently displayed
+  var pageTitle = 'Veil';
+  function onAiPage() { return /^\/ai\/?$/.test(location.pathname); }
+  function mainUrl() { return current ? '/#' + encodeURIComponent(current.href) : '/'; }
+  function setTitle(t) {
+    pageTitle = t;
+    if (!body.classList.contains('ai-open')) document.title = t;
+  }
   var loadTimer = null;
 
   // ---- URL helpers (mirrors the server's normalisation) ----
@@ -54,7 +61,9 @@
     scheme.setAttribute('data-state', !u ? 'search' : u.protocol === 'https:' ? 'secure' : 'insecure');
     scheme.title = !u ? '' : u.protocol === 'https:' ? 'Connection to the site is encrypted' : 'Connection to the site is not encrypted';
     try {
-      history.replaceState(null, '', u ? '/#' + encodeURIComponent(u.href) : '/');
+      // While the AI page (/ai) is showing, leave its URL alone; the browsing
+      // URL is restored when the user slides back.
+      if (!onAiPage()) history.replaceState(null, '', mainUrl());
     } catch (e) {}
   }
 
@@ -95,7 +104,7 @@
     stopLoading();
     frame.removeAttribute('src');
     setAddress(null);
-    document.title = 'Veil';
+    setTitle('Veil');
     setTimeout(function () { hero.focus(); }, 0);
   }
 
@@ -190,7 +199,7 @@
     if (!/^https?:$/.test(u.protocol)) return;
     setAddress(u);
     var title = typeof d.title === 'string' ? d.title.slice(0, 200) : '';
-    document.title = title ? title + ' – Veil' : 'Veil';
+    setTitle(title ? title + ' – Veil' : 'Veil');
     if (d.type === 'loaded') stopLoading();
   });
 
@@ -210,7 +219,11 @@
   if (location.hash.length > 1) {
     try { initial = new URL(decodeURIComponent(location.hash.slice(1))); } catch (e) { initial = null; }
   }
-  window.Veil = { go: go };
+  window.Veil = {
+    go: go,
+    mainUrl: mainUrl,
+    restoreTitle: function () { document.title = pageTitle; },
+  };
   if (initial && /^https?:$/.test(initial.protocol)) go(initial);
   else goHome();
 
@@ -335,7 +348,8 @@
 
     function draw(now) {
       raf = 0;
-      if (!body.classList.contains('view-home') || document.hidden) return;
+      var visible = body.classList.contains('view-home') || body.classList.contains('ai-open') || body.classList.contains('ai-leaving');
+      if (!visible || document.hidden) return;
       // Idle: after a few seconds without input, the focus point drifts slowly.
       if (!active || now - lastMove > 4000) {
         var t = (now - t0) / 1000;

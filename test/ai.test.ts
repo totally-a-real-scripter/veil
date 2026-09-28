@@ -9,6 +9,8 @@ import type { AiConfig } from '../src/config.js';
 
 // Mocks below don't serve GET /models; the startup check has its own tests.
 process.env.AI_STARTUP_CHECK = 'false';
+// Answer caching has its own test; other tests need every request to reach the mock.
+process.env.AI_CACHE_TTL_MINUTES = '0';
 import { loadProviders } from '../src/ai/providers.js';
 
 const cfgLimits = { maxInputChars: 100, maxHistoryChars: 250 };
@@ -354,7 +356,7 @@ describe('startup provider check (GET /models, no quota used)', () => {
     return {
       enabled: true, providers, strategy: 'priority', name: 'T', systemPrompt: 's', maxTokens: 100, temperature: 0.5,
       timeoutMs: 10_000, attemptTimeoutMs: 5_000, maxInputChars: 1000, maxHistoryChars: 5000, requestsPerHour: 100,
-      maxConcurrent: 2, startupCheck: true,
+      maxConcurrent: 2, startupCheck: true, maxHistoryMessages: 12, cacheTtlMs: 0, cacheMaxEntries: 0,
     };
   }
   const prov = (id: string, over: Partial<AiConfig['providers'][number]> = {}) => ({
@@ -406,5 +408,76 @@ describe('startup provider check (GET /models, no quota used)', () => {
     app.close();
     app.server.closeAllConnections();
     app.server.close();
+  });
+});
+
+describe('keeping API usage low', () => {
+  let mock: http.Server;
+  let app: ReturnType<typeof createApp>;
+  let base = '';
+  let calls = 0;
+  let lastMessages: any[] = [];
+  before(async () => {
+    mock = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        calls++;
+        lastMessages = JSON.parse(raw).messages;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: `answer ${calls}` } }] })}\n\ndata: [DONE]\n\n`);
+      });
+    });
+    await new Promise<void>((r) => mock.listen(0, '127.0.0.1', () => r()));
+    process.env.AI_1_BASE_URL = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/v1`;
+    process.env.AI_1_NAME = 'M';
+    process.env.AI_CACHE_TTL_MINUTES = '60';
+    process.env.AI_MAX_HISTORY_MESSAGES = '4';
+    app = createApp(loadConfig());
+    delete process.env.AI_1_BASE_URL;
+    delete process.env.AI_1_NAME;
+    delete process.env.AI_MAX_HISTORY_MESSAGES;
+    process.env.AI_CACHE_TTL_MINUTES = '0';
+    await new Promise<void>((r) => app.server.listen(0, '127.0.0.1', () => r()));
+    base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  });
+  after(() => {
+    app.close();
+    app.server.closeAllConnections();
+    mock.closeAllConnections();
+    app.server.close();
+    mock.close();
+  });
+  const send = async (messages: unknown) =>
+    (await (await fetch(base + '/__px/ai/chat', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-px-req': '1' }, body: JSON.stringify({ messages }),
+    })).text()).trim().split('\n').map((l) => JSON.parse(l));
+
+  test('identical first questions are answered once, then from the saved answer', async () => {
+    const a = await send([{ role: 'user', content: 'What is a proxy?' }]);
+    const b = await send([{ role: 'user', content: '  what is a PROXY  ' }]);
+    assert.equal(calls, 1);
+    assert.equal(a.find((e) => e.t).t, 'answer 1');
+    assert.equal(b.find((e) => e.t).t, 'answer 1');
+    assert.equal(b[0].cached, true);
+  });
+
+  test('follow-up questions are never served from the cache', async () => {
+    const before = calls;
+    await send([
+      { role: 'user', content: 'What is a proxy?' },
+      { role: 'assistant', content: 'answer 1' },
+      { role: 'user', content: 'and a VPN?' },
+    ]);
+    assert.equal(calls, before + 1);
+  });
+
+  test('only recent history is sent upstream', async () => {
+    const long = Array.from({ length: 11 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `turn ${i}` }));
+    await send(long);
+    // system prompt + at most 4 recent messages, starting with a user turn
+    assert.ok(lastMessages.length <= 5);
+    assert.equal(lastMessages[1].role, 'user');
+    assert.equal(lastMessages.at(-1).content, 'turn 10');
   });
 });
