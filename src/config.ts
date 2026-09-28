@@ -6,6 +6,26 @@
  * falling back to something permissive.
  */
 import { randomBytes } from 'node:crypto';
+import { loadProviders, type AiProvider } from './ai/providers.js';
+
+export interface AiConfig {
+  enabled: boolean;
+  /** Providers in priority order; see src/ai/providers.ts. */
+  providers: AiProvider[];
+  /** "priority": always try the first healthy provider. "round-robin": spread load. */
+  strategy: 'priority' | 'round-robin';
+  name: string;
+  systemPrompt: string;
+  maxTokens: number;
+  temperature: number;
+  timeoutMs: number;
+  /** Max wait for a provider's first token before failing over to the next. */
+  attemptTimeoutMs: number;
+  maxInputChars: number;
+  maxHistoryChars: number;
+  requestsPerHour: number;
+  maxConcurrent: number;
+}
 
 export type IsolationMode = 'compat' | 'sandbox';
 export type CookieSecureMode = 'auto' | 'true' | 'false';
@@ -64,6 +84,9 @@ export interface Config {
   clientIpHeader: string;
   userAgent: string;
   logRequests: boolean;
+
+  // --- AI assistant (any OpenAI-compatible chat API) ------------------------
+  ai: AiConfig;
   /** Random per-process id used to detect requests looping back through us. */
   instanceId: string;
 }
@@ -101,6 +124,58 @@ function list(name: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * The proxy's own public names (always blocked as destinations, to prevent
+ * loops). Combines PUBLIC_HOSTNAMES with the domains Coolify injects
+ * (COOLIFY_FQDN / COOLIFY_URL, comma-separated URLs), so a Coolify deployment
+ * is loop-protected without extra configuration.
+ */
+function publicHostnames(): string[] {
+  const names = new Set(list('PUBLIC_HOSTNAMES'));
+  for (const v of [process.env.COOLIFY_FQDN, process.env.COOLIFY_URL]) {
+    for (const item of (v ?? '').split(',')) {
+      const t = item.trim();
+      if (!t) continue;
+      try {
+        names.add(new URL(/^[a-z]+:\/\//i.test(t) ? t : `https://${t}`).hostname.toLowerCase());
+      } catch {
+        /* ignore malformed entries */
+      }
+    }
+  }
+  return [...names];
+}
+
+const DEFAULT_SYSTEM_PROMPT =
+  'You are {name}, a helpful, concise assistant built into Veil, a private web browsing app. ' +
+  'Answer clearly and accurately, and use Markdown (lists, **bold**, `code`, fenced code blocks) when it helps. ' +
+  'You cannot browse the web or see the page the user has open; if a question needs current information, say so ' +
+  'and suggest what they could search for. If you are unsure, say that instead of guessing.';
+
+function loadAiConfig(): AiConfig {
+  const providers = loadProviders();
+  const name = str('AI_NAME', 'Veil AI');
+  const temperature = Number(str('AI_TEMPERATURE', '0.7'));
+  if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) throw new Error('AI_TEMPERATURE must be between 0 and 2');
+  const strategy = str('AI_STRATEGY', 'priority');
+  if (strategy !== 'priority' && strategy !== 'round-robin') throw new Error('AI_STRATEGY must be priority or round-robin');
+  return {
+    enabled: bool('AI_ENABLED', providers.length > 0) && providers.length > 0,
+    providers,
+    strategy,
+    name,
+    systemPrompt: str('AI_SYSTEM_PROMPT', DEFAULT_SYSTEM_PROMPT).replace(/\{name\}/g, name),
+    maxTokens: int('AI_MAX_TOKENS', 2048, 16, 32_768),
+    temperature,
+    timeoutMs: int('AI_TIMEOUT_MS', 120_000, 5_000, 600_000),
+    attemptTimeoutMs: int('AI_ATTEMPT_TIMEOUT_MS', 20_000, 1_000, 300_000),
+    maxInputChars: int('AI_MAX_INPUT_CHARS', 4_000, 100, 100_000),
+    maxHistoryChars: int('AI_MAX_HISTORY_CHARS', 16_000, 500, 1_000_000),
+    requestsPerHour: int('AI_REQUESTS_PER_HOUR', 60, 1, 100_000),
+    maxConcurrent: int('AI_MAX_CONCURRENT', 4, 1, 1_000),
+  };
+}
+
 export function loadConfig(): Config {
   const isolation = str('ISOLATION_MODE', 'compat');
   if (isolation !== 'compat' && isolation !== 'sandbox') {
@@ -131,7 +206,7 @@ export function loadConfig(): Config {
   return {
     host: str('HOST', '0.0.0.0'),
     port: int('PORT', 43117, 1, 65535),
-    publicHosts: list('PUBLIC_HOSTNAMES'),
+    publicHosts: publicHostnames(),
 
     allowedHosts: list('ALLOWED_HOSTS'),
     blockedHosts: list('BLOCKED_HOSTS'),
@@ -173,6 +248,7 @@ export function loadConfig(): Config {
       '',
     ),
     logRequests: bool('LOG_REQUESTS', false),
+    ai: loadAiConfig(),
     instanceId: randomBytes(8).toString('hex'),
   };
 }

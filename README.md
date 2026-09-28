@@ -18,12 +18,14 @@ It is built to **not** become an open server-side request relay: every destinati
 3. [How it works](#how-it-works)
 4. [Configuration](#configuration)
 5. [Deploying with Docker](#deploying-with-docker)
-6. [Behind Nginx](#behind-nginx)
-7. [Behind Cloudflare](#behind-cloudflare)
-8. [Security model](#security-model)
-9. [Security review checklist](#security-review-checklist)
-10. [Limitations](#limitations)
-11. [Development and tests](#development-and-tests)
+6. [Deploying on Coolify](#deploying-on-coolify)
+7. [AI assistant](#ai-assistant)
+8. [Behind Nginx](#behind-nginx)
+9. [Behind Cloudflare](#behind-cloudflare)
+10. [Security model](#security-model)
+11. [Security review checklist](#security-review-checklist)
+12. [Limitations](#limitations)
+13. [Development and tests](#development-and-tests)
 
 ---
 
@@ -85,7 +87,8 @@ npm run dev
 ├── public/                    static UI (served from memory, fixed allowlist)
 │   ├── index.html             shell: toolbar, address bar, landing page, viewport
 │   ├── app.css                dark glass theme, responsive
-│   ├── app.js                 shell behaviour (navigation, loading state, menu)
+│   ├── app.js                 shell behaviour (navigation, loading state, menu, reactive background)
+│   ├── ai.js                  AI chat panel (streaming, safe Markdown rendering)
 │   ├── client.js              runtime injected into proxied pages
 │   └── favicon.svg
 ├── src/
@@ -107,11 +110,14 @@ npm run dev
 │   ├── rewrite/
 │   │   ├── html.ts            parse5-based HTML rewriter
 │   │   └── css.ts             url() / @import rewriter
+│   ├── ai/chat.ts             AI assistant backend (streaming, failover, cooldowns)
+│   ├── ai/providers.ts        free-tier presets + custom OpenAI-compatible providers
 │   ├── session/store.ts       server-side cookie jars
 │   ├── pages/errors.ts        escaped error pages
 │   └── util/log.ts            JSON logger
 └── test/
     ├── security.test.ts       SSRF matrix, codecs, rewriters, limits
+    ├── ai.test.ts             AI endpoint: streaming, failover, cooldowns, validation, CSRF, quotas
     └── integration.test.ts    end-to-end proxy against a live local upstream
 ```
 
@@ -204,6 +210,113 @@ docker run -d --name veil --restart unless-stopped \
 - Bind to `127.0.0.1` and publish through a TLS-terminating reverse proxy.
 
 > **Network egress:** the container needs outbound access to the internet on the allowed ports. For defence in depth, also block the container from reaching your private networks at the network layer (Docker network policy, host firewall or cloud security group). Consider this mandatory on cloud VMs, which expose metadata endpoints.
+
+---
+
+## Deploying on Coolify
+
+Coolify builds the image from the `Dockerfile` and routes your domain to it through its own proxy (Traefik), which also handles HTTPS certificates and WebSockets.
+
+1. **Put the project in a Git repository** (GitHub, GitLab, Gitea, …) and connect it in Coolify: *Projects → Add resource → Public/Private repository*.
+2. **Build pack:** choose **Dockerfile** (Base directory `/`, Dockerfile location `/Dockerfile`).
+3. **Network:**
+   - *Ports Exposes:* `43117`
+   - *Ports Mappings:* leave empty. Traefik reaches the container over Coolify's internal network, so no host port needs to be opened.
+   - *Domains:* `https://proxy.example.com` (your domain; Coolify issues the certificate).
+4. **Environment variables** (*Environment Variables* tab):
+   ```
+   PORT=43117
+   TRUST_PROXY_HOPS=1
+   COOKIE_SECURE=true
+   BLOCKED_CIDRS=<your server's public IP>/32
+   ```
+   - `TRUST_PROXY_HOPS=1` makes rate limits apply to real visitors instead of Traefik's address.
+   - `BLOCKED_CIDRS` stops the proxy from looping back into other apps on the same server via its public IP.
+   - The app reads Coolify's `COOLIFY_FQDN` automatically and blocks its own domain as a destination, so `PUBLIC_HOSTNAMES` is only needed for extra names.
+   - Add anything else from `.env.example` as needed.
+5. **Health check** (*Health Checks* tab): enable it with path `/healthz`, port `43117`, scheme `http`. (The image's own `HEALTHCHECK` also works.)
+6. **Hardening (optional):** under *Advanced → Custom Docker Options*, add
+   `--cap-drop=ALL --security-opt=no-new-privileges --init`
+7. **Deploy.** Open your domain, and check `https://proxy.example.com/healthz`.
+
+**Using Cloudflare in front of Coolify?** Set the DNS record to proxied, SSL mode to **Full (strict)**, and replace `TRUST_PROXY_HOPS=1` with `CLIENT_IP_HEADER=cf-connecting-ip`. Only do that if the server's ports 80/443 accept traffic from Cloudflare IPs alone; otherwise visitors can fake the header.
+
+**Why internal Coolify services are safe:** the container shares Docker networks with Coolify's own services and your other apps. Their private addresses (`10.x`, `172.16–31.x`) and single-label Docker service names (e.g. `coolify-db`) are refused by the destination policy, and only ports 80/443 are allowed, so the Coolify dashboard port can't be reached through the proxy.
+
+Sessions are kept in memory, so keep the resource at **one replica** (the default); a redeploy signs everyone out of proxied sites.
+
+---
+
+## AI assistant
+
+Veil includes a chat assistant: the **Ask AI** button on the home screen, the sparkle button in the browsing toolbar, **Ctrl+J** anywhere, or **Ctrl+Enter** in the search box to send what you typed. Answers stream in live with formatting, code blocks and copy buttons. Links in answers open through the proxy, and each answer shows which provider wrote it.
+
+### Multiple free providers with automatic failover
+
+Add a free API key for as many providers as you like. Veil tries them **in order, fastest first**. When one is rate-limited, out of free quota, erroring, or doesn't start answering within `AI_ATTEMPT_TIMEOUT_MS` (20 s), the **next provider answers the same message immediately**. The one that failed **rests** until its limit resets:
+
+- Rate limits honour the provider's `Retry-After` / `x-ratelimit-reset-*` headers when it sends them. Otherwise the rest backs off 1 → 2 → 4 … up to 60 minutes, or at least an hour when the provider says a daily quota is used up.
+- A rejected key or unknown model rests for 30 minutes (check the logs); server errors for 30 seconds.
+- When every provider is resting, visitors are told roughly when to try again.
+
+| Provider | Get a free key | Default model | Why it's in the chain |
+|---|---|---|---|
+| Groq | [console.groq.com/keys](https://console.groq.com/keys) | `llama-3.3-70b-versatile` | Very fast; generous daily requests (tokens per minute is the real cap) |
+| Cerebras | [cloud.cerebras.ai](https://cloud.cerebras.ai) | `gpt-oss-120b` | Very fast; large token budget |
+| Gemini | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | `gemini-2.5-flash` | Strong quality on Google's free tier |
+| Mistral | [console.mistral.ai](https://console.mistral.ai) | `mistral-small-latest` | Large monthly token allowance |
+| OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) | `meta-llama/llama-3.3-70b-instruct:free` | Many free models; low daily cap, good backup |
+| Ollama (self-hosted) | no key | `llama3.2:3b` | Unlimited last resort on your own server |
+
+Set just the keys you have, for example in Coolify's environment variables:
+
+```
+GROQ_API_KEY=gsk_...
+CEREBRAS_API_KEY=csk-...
+GEMINI_API_KEY=AIza...
+MISTRAL_API_KEY=...
+OPENROUTER_API_KEY=sk-or-...
+```
+
+- **Order:** `AI_ORDER` changes the order (default `groq,cerebras,gemini,mistral,openrouter,custom,ollama`).
+- **Load spreading:** `AI_STRATEGY=round-robin` spreads load across providers instead of always starting with the first. That helps stay under per-minute limits when many people use it at once.
+- **Models:** each default can be overridden (`GROQ_MODEL`, `GEMINI_MODEL`, …). Free catalogs and limits change often, so if a provider starts returning "model not found", check its current free models and update the setting.
+- **Privacy:** some free tiers may use prompts to improve their models; read each provider's terms if that matters to you.
+
+**Other OpenAI-compatible APIs** (including PhotonAI when its API launches) can join the chain as `AI_1_*` … `AI_9_*`:
+
+```
+AI_1_NAME=PhotonAI
+AI_1_BASE_URL=https://<their API>/v1
+AI_1_API_KEY=...
+AI_1_MODEL=<model>
+```
+
+> **About PhotonAI:** PHOTONAI ([photon-ai.com](https://photon-ai.com/)) is a Python library for training machine-learning pipelines, not a chat AI, so it can't power an assistant. PhotonAI ([photonai.ai](https://photonai.ai/platform/api)) plans an OpenAI-compatible chat API (listed as expected Q1 2027, paid per token). It can be added as above when available.
+
+### Unlimited fallback: Ollama on your own server
+
+Runs an open-source model on your server as the last link in the chain. `llama3.2:3b` needs roughly 3–4 GB of free RAM; on CPU it answers a few words per second (`llama3.2:1b` for small servers).
+
+**Docker Compose:** set `OLLAMA_BASE_URL=http://ollama:11434`, then:
+```bash
+docker compose --profile ai up -d --build
+docker compose exec ollama ollama pull llama3.2:3b     # one-time model download
+```
+
+**Coolify:**
+1. Add a resource from the Docker image `ollama/ollama:latest` in the same project/environment.
+   - Give it no domain or port mapping.
+   - Add persistent storage at `/root/.ollama`.
+2. Deploy it, open its **Terminal**, and run `ollama pull llama3.2:3b`.
+3. On the Veil resource, set `OLLAMA_BASE_URL=http://<ollama container or service name>:11434` and redeploy. If Veil can't reach it, enable **Connect to predefined network** on both resources (the name varies by Coolify version).
+
+### Limits and safety
+- API keys and URLs stay on the server. The browser only sees provider names, models and whether each is currently available.
+- Per-visitor quota (`AI_REQUESTS_PER_HOUR`, default 60), one answer at a time per visitor, `AI_MAX_CONCURRENT` answers overall, message and history size limits, a timeout, and a cap on answer length.
+- Only your messages and the assistant's replies are accepted from the browser. The system prompt is fixed on the server (`AI_SYSTEM_PROMPT` to change it).
+- Model output is rendered as text through a small Markdown renderer. It is never inserted as raw HTML, and only http(s) links are allowed.
+- Conversations are kept in the browser tab only and aren't stored on the server. Upstream error details are logged for the operator, never shown to visitors.
 
 ---
 
@@ -307,6 +420,7 @@ This is a review of the specific risks the implementation was checked against. M
 | **Compressed responses** | Only `gzip, deflate, br` requested; rewrites decode (incl. raw-deflate fallback) and re-encode; passthrough keeps the original encoding and length headers; unknown encodings fail closed for rewritten types | `body.ts`, `handler.ts` |
 | **Broken relative URLs** | Hierarchical path scheme, `<base href>` honoured, trailing-slash canonicalisation, protocol-relative URLs resolved against the real page, root-relative fallback | `urlcodec.ts`, `html.ts`, `app.ts` |
 | **Redirects escaping the proxy** | `Location` and `Refresh` resolved against the real URL and re-encoded under `/p/`; non-http(s) targets dropped; CSP `form-action`/`connect-src` prevent direct egress; Navigation API catch for script navigations | `handler.ts`, `client.js` |
+| **AI endpoint abuse / key leakage** | Operator-configured upstream only (not user-controllable, so no SSRF), key never sent to clients, CSRF guard, per-client quota and concurrency, input/output caps, output rendered via DOM text APIs | `ai/chat.ts`, `ai.js` |
 | **Untyped responses** | Sniffed server-side, so HTML without a `Content-Type` is rewritten, not rendered raw by the browser | `handler.ts` |
 
 ---

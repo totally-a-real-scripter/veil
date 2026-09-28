@@ -106,7 +106,7 @@ export function setUiSecurityHeaders(res: ServerResponse): void {
  * one site would silently apply to all of them. Deny these outright.
  */
 export const PERMISSIONS_POLICY =
-  'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), ' +
+  'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), ' +
   'midi=(), display-capture=(), publickey-credentials-get=(), publickey-credentials-create=(), ' +
   'otp-credentials=(), idle-detection=(), local-fonts=(), browsing-topics=()';
 

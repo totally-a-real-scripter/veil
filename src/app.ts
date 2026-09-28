@@ -38,6 +38,7 @@ import { handleUpgrade } from './proxy/websocket.js';
 import { decodeProxyPath, encodeProxyPath, realUrlFromProxyUrl } from './proxy/urlcodec.js';
 import { firstHeader } from './proxy/headers.js';
 import { log } from './util/log.js';
+import { AiService } from './ai/chat.js';
 import ipaddr from 'ipaddr.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,7 @@ function loadStatic(): Map<string, StaticFile> {
     ['/', 'index.html', 'text/html; charset=utf-8', 'no-cache'],
     ['/__px/static/app.css', 'app.css', 'text/css; charset=utf-8', 'public, max-age=3600'],
     ['/__px/static/app.js', 'app.js', 'text/javascript; charset=utf-8', 'public, max-age=3600'],
+    ['/__px/static/ai.js', 'ai.js', 'text/javascript; charset=utf-8', 'public, max-age=3600'],
     ['/__px/static/favicon.svg', 'favicon.svg', 'image/svg+xml', 'public, max-age=86400'],
     ['/__px/client.js', 'client.js', 'text/javascript; charset=utf-8', 'public, max-age=3600'],
   ];
@@ -89,6 +91,7 @@ export function createApp(cfg: Config, deps: Partial<Deps> = {}) {
     deps: { resolver: deps.resolver ?? systemResolver, dial: deps.dial },
   };
   const statics = loadStatic();
+  const ai = new AiService(cfg.ai);
   const startedAt = Date.now();
 
   async function onRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -173,6 +176,11 @@ export function createApp(cfg: Config, deps: Partial<Deps> = {}) {
     }
 
     if (pathname === '/__px/cookie' && method === 'POST') return handleCookieWrite(ctx, req, res, ip);
+    if (pathname === '/__px/ai/status' && method === 'GET') return json(res, 200, ai.status());
+    if (pathname === '/__px/ai/chat' && method === 'POST') {
+      if (!sameOriginApiRequest(ctx, req)) return json(res, 403, { error: 'forbidden' });
+      return ai.handleChat(req, res, ip);
+    }
     if (pathname === '/__px/clear' && method === 'POST') {
       if (!sameOriginApiRequest(ctx, req)) return json(res, 403, { error: 'forbidden' });
       ctx.sessions.destroy(currentSession(ctx, req)?.id);
@@ -248,6 +256,7 @@ export function createApp(cfg: Config, deps: Partial<Deps> = {}) {
     ctx.rate.stop();
     ctx.sessionRate.stop();
     ctx.sessions.stop();
+    ai.stop();
   };
   return { server, ctx, close };
 }
