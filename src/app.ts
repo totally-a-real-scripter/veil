@@ -14,7 +14,6 @@
  *                             redirected back under /p/ using the Referer
  */
 import { readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +24,6 @@ import { ConcurrencyGate, ConnectionCounter, LimitError, RateLimiter } from './s
 import { HostPolicy, PolicyError, systemResolver } from './security/ssrf.js';
 import { SessionStore } from './session/store.js';
 import {
-  readCookie,
   currentSession,
   ensureSession,
   proxyOrigin,
@@ -36,13 +34,11 @@ import {
   type Deps,
 } from './proxy/context.js';
 import { expireSessionCookie, handleProxy } from './proxy/handler.js';
-import { setClientScriptVersion } from './rewrite/html.js';
 import { handleUpgrade } from './proxy/websocket.js';
 import { decodeProxyPath, encodeProxyPath, realUrlFromProxyUrl } from './proxy/urlcodec.js';
 import { firstHeader } from './proxy/headers.js';
 import { log } from './util/log.js';
 import { AiService } from './ai/chat.js';
-import { AdBlocker } from './adblock/index.js';
 import ipaddr from 'ipaddr.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -98,13 +94,10 @@ export function createApp(cfg: Config, deps: Partial<Deps> = {}) {
     sessionRate: new RateLimiter(cfg.sessionsPerIpPerHour / 60, cfg.sessionsPerIpPerHour),
     gate: new ConcurrencyGate(cfg.maxConcurrent, cfg.maxConcurrentPerIp, cfg.maxQueue, cfg.queueTimeoutMs),
     wsCounter: new ConnectionCounter(cfg.maxWebSockets, cfg.maxWebSocketsPerIp),
-    adblock: new AdBlocker(cfg.adblock),
     deps: { resolver: deps.resolver ?? systemResolver, dial: deps.dial },
   };
   const statics = loadStatic();
-  setClientScriptVersion(createHash('sha256').update(statics.get('/__px/client.js')!.body).digest('hex').slice(0, 10));
   const ai = new AiService(cfg.ai);
-  ctx.adblock.start(); // downloads extra blocklists in the background
   const startedAt = Date.now();
 
   async function onRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -189,11 +182,7 @@ export function createApp(cfg: Config, deps: Partial<Deps> = {}) {
     }
 
     if (pathname === '/__px/cookie' && method === 'POST') return handleCookieWrite(ctx, req, res, ip);
-    if (pathname.startsWith('/__px/diag')) return handleDiag(ctx, req, res, pathname, method);
     if (pathname === '/__px/ai/status' && method === 'GET') return json(res, 200, ai.status());
-    if (pathname === '/__px/adblock/status' && method === 'GET') {
-      return json(res, 200, { ...ctx.adblock.status(), on: ctx.adblock.activeFor(readCookie(req, 'px_ab')) });
-    }
     if (pathname === '/__px/ai/chat' && method === 'POST') {
       if (!sameOriginApiRequest(ctx, req)) return json(res, 403, { error: 'forbidden' });
       return ai.handleChat(req, res, ip);
@@ -274,7 +263,6 @@ export function createApp(cfg: Config, deps: Partial<Deps> = {}) {
     ctx.sessionRate.stop();
     ctx.sessions.stop();
     ai.stop();
-    ctx.adblock.stop();
   };
   return { server, ctx, close };
 }
@@ -340,79 +328,6 @@ async function handleCookieWrite(ctx: AppContext, req: http.IncomingMessage, res
   } catch {
     return json(res, 400, { error: 'bad_request' });
   }
-}
-
-/**
- * Optional diagnostics: pages of a browser that opened /__px/diag/on report a
- * few numbers once a second (see the end of public/client.js). The last few
- * thousand reports are kept in memory and shown at /__px/diag/log to browsers
- * that also have diagnostics on. Nothing is written to disk.
- */
-const DIAG_MAX = 4000;
-const DIAG_PARTS: [string, string][] = [
-  ['client', 'Whole page runtime (turns off everything below)'],
-  ['net', 'fetch / XHR / WebSocket / Worker rewriting'],
-  ['sw', 'Service worker blocking'],
-  ['hist', 'window.open and history hooks'],
-  ['dom', 'DOM property / attribute rewriting and the page observer'],
-  ['nav', 'Navigation catcher and address repair'],
-  ['msg', 'postMessage origin translation'],
-  ['cookie', 'document.cookie emulation'],
-  ['storage', 'localStorage / sessionStorage namespacing'],
-  ['guard', 'Frame guard'],
-];
-const DIAG_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Diagnostics on</title>
-<body style="font:16px system-ui;background:#0b0b0c;color:#eee;padding:24px;max-width:640px">
-<h1>Diagnostics on</h1>
-<p>This browser now reports page statistics to the proxy for 24 hours. Reproduce the problem, then tell Claude.</p>
-<h2 style="font-size:18px">Switch parts off (for testing)</h2>
-<p style="color:#aaa">Ticked parts are turned off on pages opened after you save. Sites may misbehave while parts are off.</p>
-<form id="f">${DIAG_PARTS.map(([k, label]) => `<label style="display:block;margin:6px 0"><input type="checkbox" value="${k}"> <b>${k}</b> &mdash; ${label}</label>`).join('')}
-<button style="margin-top:10px;padding:8px 16px">Save</button> <span id="s" style="color:#8f8"></span></form>
-<p><a style="color:#8cf" href="/">Open the proxy</a> &middot; <a style="color:#8cf" href="/__px/diag/off">Turn diagnostics off</a></p>
-<script>
-var cur = (document.cookie.match(/(?:^|; )px_off=([^;]*)/) || [])[1] || '';
-cur.split('.').forEach(function (k) { var b = document.querySelector('input[value="' + k + '"]'); if (b) b.checked = true; });
-document.getElementById('f').onsubmit = function (e) {
-  e.preventDefault();
-  var v = [].slice.call(document.querySelectorAll('input:checked')).map(function (b) { return b.value; }).join('.');
-  document.cookie = 'px_off=' + v + '; Path=/; Max-Age=86400; SameSite=Lax' + (location.protocol === 'https:' ? '; Secure' : '');
-  document.getElementById('s').textContent = v ? 'Saved: off = ' + v : 'Saved: everything on';
-};
-</script>`;
-const diagLog: unknown[] = [];
-async function handleDiag(ctx: AppContext, req: http.IncomingMessage, res: http.ServerResponse, pathname: string, method: string): Promise<void> {
-  const on = readCookie(req, 'px_diag') === '1';
-  const secure = proxyOrigin(ctx, req).startsWith('https:') ? '; Secure' : '';
-  if (pathname === '/__px/diag/on' && method === 'GET') {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': `px_diag=1; Path=/; Max-Age=86400; SameSite=Lax${secure}` });
-    res.end(DIAG_PAGE);
-    return;
-  }
-  if (pathname === '/__px/diag/off' && method === 'GET') {
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': [`px_diag=; Path=/; Max-Age=0; SameSite=Lax${secure}`, `px_off=; Path=/; Max-Age=0; SameSite=Lax${secure}`] });
-    res.end('Diagnostics off.\n');
-    return;
-  }
-  if (!on) return json(res, 404, { error: 'not_found' });
-  if (pathname === '/__px/diag' && method === 'POST') {
-    if (!sameOriginApiRequest(ctx, req)) return json(res, 403, { error: 'forbidden' });
-    let raw = '';
-    try {
-      for await (const chunk of req) {
-        raw += chunk;
-        if (raw.length > 8192) return json(res, 413, { error: 'too_large' });
-      }
-      const entry = JSON.parse(raw) as Record<string, unknown>;
-      diagLog.push({ at: new Date().toISOString(), ua: String(req.headers['user-agent'] ?? '').slice(0, 160), ...entry });
-      if (diagLog.length > DIAG_MAX) diagLog.splice(0, diagLog.length - DIAG_MAX);
-      return json(res, 204, null);
-    } catch {
-      return json(res, 400, { error: 'bad_request' });
-    }
-  }
-  if (pathname === '/__px/diag/log' && method === 'GET') return json(res, 200, diagLog);
-  return json(res, 404, { error: 'not_found' });
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
