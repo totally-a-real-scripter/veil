@@ -362,6 +362,16 @@
 
   // Chromium: catch script-driven navigations (location.href = "https://...")
   // that would otherwise leave the proxy.
+  // Never fight a page over its address: if it keeps moving it right back,
+  // stop repairing (a tug-of-war would freeze the tab).
+  var addrFixes = [];
+  function addressFixAllowed() {
+    var now = Date.now();
+    while (addrFixes.length && now - addrFixes[0] > 5000) addrFixes.shift();
+    if (addrFixes.length >= 5) return false;
+    addrFixes.push(now);
+    return true;
+  }
   if (window.navigation && window.navigation.addEventListener) {
     window.navigation.addEventListener('navigate', function (e) {
       try {
@@ -372,7 +382,7 @@
         // relative requests keep working.
         if ((e.navigationType === 'push' || e.navigationType === 'replace') && !e.hashChange) {
           var d = new URL(e.destination.url);
-          if (d.origin === proxyOrigin && d.pathname.indexOf(PREFIX) !== 0 && d.pathname.indexOf('/__px/') !== 0) {
+          if (d.origin === proxyOrigin && d.pathname.indexOf(PREFIX) !== 0 && d.pathname.indexOf('/__px/') !== 0 && addressFixAllowed()) {
             var realOrigin = currentReal().origin; // the address hasn't changed yet
             if (/^https?:/.test(realOrigin)) {
               var fixed = encode(new URL(d.pathname + d.search + d.hash, realOrigin));
