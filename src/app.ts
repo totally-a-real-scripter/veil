@@ -349,17 +349,48 @@ async function handleCookieWrite(ctx: AppContext, req: http.IncomingMessage, res
  * that also have diagnostics on. Nothing is written to disk.
  */
 const DIAG_MAX = 4000;
+const DIAG_PARTS: [string, string][] = [
+  ['client', 'Whole page runtime (turns off everything below)'],
+  ['net', 'fetch / XHR / WebSocket / Worker rewriting'],
+  ['sw', 'Service worker blocking'],
+  ['hist', 'window.open and history hooks'],
+  ['dom', 'DOM property / attribute rewriting and the page observer'],
+  ['nav', 'Navigation catcher and address repair'],
+  ['msg', 'postMessage origin translation'],
+  ['cookie', 'document.cookie emulation'],
+  ['storage', 'localStorage / sessionStorage namespacing'],
+  ['guard', 'Frame guard'],
+];
+const DIAG_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Diagnostics on</title>
+<body style="font:16px system-ui;background:#0b0b0c;color:#eee;padding:24px;max-width:640px">
+<h1>Diagnostics on</h1>
+<p>This browser now reports page statistics to the proxy for 24 hours. Reproduce the problem, then tell Claude.</p>
+<h2 style="font-size:18px">Switch parts off (for testing)</h2>
+<p style="color:#aaa">Ticked parts are turned off on pages opened after you save. Sites may misbehave while parts are off.</p>
+<form id="f">${DIAG_PARTS.map(([k, label]) => `<label style="display:block;margin:6px 0"><input type="checkbox" value="${k}"> <b>${k}</b> &mdash; ${label}</label>`).join('')}
+<button style="margin-top:10px;padding:8px 16px">Save</button> <span id="s" style="color:#8f8"></span></form>
+<p><a style="color:#8cf" href="/">Open the proxy</a> &middot; <a style="color:#8cf" href="/__px/diag/off">Turn diagnostics off</a></p>
+<script>
+var cur = (document.cookie.match(/(?:^|; )px_off=([^;]*)/) || [])[1] || '';
+cur.split('.').forEach(function (k) { var b = document.querySelector('input[value="' + k + '"]'); if (b) b.checked = true; });
+document.getElementById('f').onsubmit = function (e) {
+  e.preventDefault();
+  var v = [].slice.call(document.querySelectorAll('input:checked')).map(function (b) { return b.value; }).join('.');
+  document.cookie = 'px_off=' + v + '; Path=/; Max-Age=86400; SameSite=Lax' + (location.protocol === 'https:' ? '; Secure' : '');
+  document.getElementById('s').textContent = v ? 'Saved: off = ' + v : 'Saved: everything on';
+};
+</script>`;
 const diagLog: unknown[] = [];
 async function handleDiag(ctx: AppContext, req: http.IncomingMessage, res: http.ServerResponse, pathname: string, method: string): Promise<void> {
   const on = readCookie(req, 'px_diag') === '1';
   const secure = proxyOrigin(ctx, req).startsWith('https:') ? '; Secure' : '';
   if (pathname === '/__px/diag/on' && method === 'GET') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': `px_diag=1; Path=/; Max-Age=86400; SameSite=Lax${secure}` });
-    res.end('<!doctype html><meta name="viewport" content="width=device-width"><title>Diagnostics on</title><body style="font:16px system-ui;background:#0b0b0c;color:#eee;padding:24px"><h1>Diagnostics on</h1><p>This browser now reports page statistics to the proxy for 24 hours. Reproduce the problem, then tell Claude.</p><p><a style="color:#8cf" href="/">Open the proxy</a> &middot; <a style="color:#8cf" href="/__px/diag/off">Turn off</a></p>');
+    res.end(DIAG_PAGE);
     return;
   }
   if (pathname === '/__px/diag/off' && method === 'GET') {
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': `px_diag=; Path=/; Max-Age=0; SameSite=Lax${secure}` });
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': [`px_diag=; Path=/; Max-Age=0; SameSite=Lax${secure}`, `px_off=; Path=/; Max-Age=0; SameSite=Lax${secure}`] });
     res.end('Diagnostics off.\n');
     return;
   }

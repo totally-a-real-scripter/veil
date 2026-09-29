@@ -32,6 +32,9 @@
   var proxyOrigin = location.origin;
   var nativeFetch = window.fetch ? window.fetch.bind(window) : null;
   var nativeReplaceState = History.prototype.replaceState;
+  // Diagnostics: parts of this runtime can be switched off (cookie px_off, set at
+  // /__px/diag/on) to find which one a misbehaving page trips over.
+  function off(part) { return !!(cfg.off && cfg.off.indexOf(part) >= 0); }
   // Counters for the optional diagnostics recorder (see the end of this file).
   var DIAG = { fetch: 0, xhr: 0, navs: 0, fixes: 0, errs: [] };
 
@@ -146,6 +149,7 @@
   // UI shell can display pages).
 
   (function frameGuard() {
+    if (off('guard')) return;
     if (!cfg.frameGuard || window.parent === window) return;
     var allowed = false;
     try {
@@ -171,6 +175,7 @@
   // --------------------------------------------------------------------------
   // Network APIs
 
+  if (!off('net')) (function () {
   if (nativeFetch) {
     window.fetch = function (input, init) {
       try {
@@ -219,7 +224,9 @@
       return beacon(rewrite(url), data);
     };
   }
+  })();
 
+  if (!off('sw')) (function () {
   // Service workers are refused by the server; fail fast and quietly here.
   if (navigator.serviceWorker && navigator.serviceWorker.register) {
     try {
@@ -228,7 +235,9 @@
       };
     } catch (e) {}
   }
+  })();
 
+  if (!off('hist')) (function () {
   var nativeOpen = window.open;
   window.open = function (url) {
     var args = Array.prototype.slice.call(arguments);
@@ -246,10 +255,12 @@
       return r;
     };
   });
+  })();
 
   // --------------------------------------------------------------------------
   // DOM properties and attributes
 
+  if (!off('dom')) (function () {
   var URL_ATTRS = {
     href: ['A', 'AREA', 'LINK', 'BASE'],
     src: ['IMG', 'SCRIPT', 'IFRAME', 'FRAME', 'EMBED', 'SOURCE', 'AUDIO', 'VIDEO', 'TRACK', 'INPUT'],
@@ -363,7 +374,9 @@
     },
     true,
   );
+  })();
 
+  if (!off('nav')) (function () {
   // Chromium: catch script-driven navigations (location.href = "https://...")
   // that would otherwise leave the proxy.
   // Never fight a page over its address: if it keeps moving it right back,
@@ -410,11 +423,13 @@
       } catch (err) {}
     });
   }
+  })();
 
   // --------------------------------------------------------------------------
   // postMessage: every proxied frame shares the proxy origin, so translate
   // target origins and present the sender's real origin to listeners.
 
+  if (!off('msg')) (function () {
   var nativePost = window.postMessage;
   window.postMessage = function (message, targetOrigin, transfer) {
     var args = Array.prototype.slice.call(arguments);
@@ -443,12 +458,14 @@
       });
     }
   } catch (e) {}
+  })();
 
   // --------------------------------------------------------------------------
   // document.cookie emulation. Real cookies live in the server-side jar; the
   // page sees only its site's non-HttpOnly cookies, and writes are sent to the
   // server so they accompany later requests.
 
+  if (!off('cookie')) (function () {
   var jar = {};
   String(cfg.cookies || '')
     .split(/;\s*/)
@@ -493,12 +510,14 @@
       },
     });
   } catch (e) {}
+  })();
 
   // --------------------------------------------------------------------------
   // Storage namespacing: every proxied site shares one origin, so keys are
   // prefixed per real origin to avoid collisions between sites. (Convenience
   // only; not an isolation boundary.)
 
+  if (!off('storage')) (function () {
   function namespacedStorage(getNative) {
     var nat = null;
     try {
@@ -583,6 +602,7 @@
       } catch (e) {}
     });
   }
+  })();
 
   // --------------------------------------------------------------------------
   // Ad blocker (in-page part). Ad and tracker requests are already blocked on
@@ -717,7 +737,7 @@
           heapMB: mem.usedJSHeapSize ? Math.round(mem.usedJSHeapSize / 1048576) : null,
           nodes: document.getElementsByTagName('*').length, frames: window.frames.length,
           fetch: DIAG.fetch, xhr: DIAG.xhr, res: res, navs: DIAG.navs, fixes: DIAG.fixes, longMs: Math.round(longMs),
-          errs: DIAG.errs.slice(), vid: vid,
+          errs: DIAG.errs.slice(), vid: vid, off: cfg.off || [],
         };
       }
       function send(kind) {

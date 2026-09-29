@@ -268,8 +268,12 @@ export async function handleProxy(
     let output: string;
     if (kind === 'html') {
       const jsCookies = session ? await ctx.sessions.scriptVisibleCookies(session, target) : '';
+      // Diagnostics only: parts of the page runtime (or all of it) switched off.
+      const diagOn = readCookie(req, 'px_diag') === '1';
+      const pxOff = diagOn ? (readCookie(req, 'px_off') ?? '').split(/[,.]/).filter((x) => /^[a-z]{2,10}$/.test(x)).slice(0, 16) : [];
       output = rewriteHtml(text, {
         url: target,
+        inject: !pxOff.includes('client'),
         clientConfig: {
           url: target.href,
           cookies: jsCookies,
@@ -277,7 +281,8 @@ export async function handleProxy(
           cookieApi: cfg.enableCookies,
           frameGuard: frameGuard(upRes.headers),
           adblock: adOn,
-          diag: readCookie(req, 'px_diag') === '1',
+          diag: diagOn,
+          off: pxOff,
         },
         // Remove YouTube's ad schedule from the data embedded in the page.
         pruneYouTube: adOn && isYouTubeHost(target.hostname),
