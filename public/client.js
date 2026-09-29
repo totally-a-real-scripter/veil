@@ -32,6 +32,8 @@
   var proxyOrigin = location.origin;
   var nativeFetch = window.fetch ? window.fetch.bind(window) : null;
   var nativeReplaceState = History.prototype.replaceState;
+  // Counters for the optional diagnostics recorder (see the end of this file).
+  var DIAG = { fetch: 0, xhr: 0, navs: 0, fixes: 0, errs: [] };
 
   // --------------------------------------------------------------------------
   // URL helpers
@@ -179,6 +181,7 @@
           input = rewrite(input instanceof URL ? input.href : input);
         }
       } catch (e) {}
+      DIAG.fetch++;
       return nativeFetch(input, init);
     };
   }
@@ -189,6 +192,7 @@
     try {
       args[1] = rewrite(url instanceof URL ? url.href : url);
     } catch (e) {}
+    DIAG.xhr++;
     return xhrOpen.apply(this, args);
   };
 
@@ -370,10 +374,12 @@
     while (addrFixes.length && now - addrFixes[0] > 5000) addrFixes.shift();
     if (addrFixes.length >= 5) return false;
     addrFixes.push(now);
+    DIAG.fixes++;
     return true;
   }
   if (window.navigation && window.navigation.addEventListener) {
     window.navigation.addEventListener('navigate', function (e) {
+      DIAG.navs++;
       try {
         // Some apps (YouTube) change the address with history functions taken
         // from elsewhere, which our pushState/replaceState hooks never see, and
@@ -676,6 +682,57 @@
         } catch (e) {}
       }, 250);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Diagnostics recorder (off unless turned on at /__px/diag/on). Once a second
+  // it reports a few numbers about this page to the proxy (memory, DOM size,
+  // request/navigation counts, errors, video state), so a page that crashes the
+  // tab can be investigated afterwards at /__px/diag/log.
+
+  if (cfg.diag && nativeFetch) {
+    (function () {
+      var id = Math.random().toString(36).slice(2, 8);
+      var start = Date.now();
+      var res = 0, longMs = 0;
+      var depth = 0;
+      try { for (var w = window; w !== w.parent && depth < 20; w = w.parent) depth++; } catch (e) {}
+      try { new PerformanceObserver(function (l) { res += l.getEntries().length; }).observe({ type: 'resource' }); } catch (e) {}
+      try { new PerformanceObserver(function (l) { l.getEntries().forEach(function (x) { longMs += x.duration; }); }).observe({ type: 'longtask' }); } catch (e) {}
+      function note(msg) { DIAG.errs.push(String(msg).slice(0, 160)); if (DIAG.errs.length > 5) DIAG.errs.shift(); send('error'); }
+      window.addEventListener('error', function (e) { note((e.message || 'error') + ' @' + String(e.filename || '').slice(-60) + ':' + e.lineno); });
+      window.addEventListener('unhandledrejection', function (e) { var r = e.reason; note('rejection: ' + (r && r.message ? r.message : String(r))); });
+      function snapshot(kind) {
+        var v = document.querySelector('video');
+        var vid = null;
+        if (v) {
+          var buf = 0;
+          try { if (v.buffered.length) buf = Math.round((v.buffered.end(v.buffered.length - 1) - v.currentTime) * 10) / 10; } catch (e) {}
+          vid = { t: Math.round(v.currentTime * 10) / 10, rs: v.readyState, paused: v.paused, buf: buf, w: v.videoWidth, h: v.videoHeight, err: v.error ? v.error.code : 0 };
+        }
+        var mem = performance.memory || {};
+        return {
+          kind: kind, id: id, depth: depth, up: Math.round((Date.now() - start) / 1000),
+          host: currentReal().host, path: location.pathname.slice(0, 60),
+          heapMB: mem.usedJSHeapSize ? Math.round(mem.usedJSHeapSize / 1048576) : null,
+          nodes: document.getElementsByTagName('*').length, frames: window.frames.length,
+          fetch: DIAG.fetch, xhr: DIAG.xhr, res: res, navs: DIAG.navs, fixes: DIAG.fixes, longMs: Math.round(longMs),
+          errs: DIAG.errs.slice(), vid: vid,
+        };
+      }
+      function send(kind) {
+        try {
+          nativeFetch('/__px/diag', {
+            method: 'POST', keepalive: true, credentials: 'same-origin',
+            headers: { 'content-type': 'application/json', 'x-px-req': '1' },
+            body: JSON.stringify(snapshot(kind)),
+          }).catch(function () {});
+        } catch (e) {}
+      }
+      send('start');
+      setInterval(function () { send('tick'); }, 1000);
+      window.addEventListener('pagehide', function () { send('leave'); });
+    })();
   }
 
   // --------------------------------------------------------------------------

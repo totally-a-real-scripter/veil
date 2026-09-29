@@ -277,6 +277,7 @@ export async function handleProxy(
           cookieApi: cfg.enableCookies,
           frameGuard: frameGuard(upRes.headers),
           adblock: adOn,
+          diag: readCookie(req, 'px_diag') === '1',
         },
         // Remove YouTube's ad schedule from the data embedded in the page.
         pruneYouTube: adOn && isYouTubeHost(target.hostname),

@@ -189,6 +189,7 @@ export function createApp(cfg: Config, deps: Partial<Deps> = {}) {
     }
 
     if (pathname === '/__px/cookie' && method === 'POST') return handleCookieWrite(ctx, req, res, ip);
+    if (pathname.startsWith('/__px/diag')) return handleDiag(ctx, req, res, pathname, method);
     if (pathname === '/__px/ai/status' && method === 'GET') return json(res, 200, ai.status());
     if (pathname === '/__px/adblock/status' && method === 'GET') {
       return json(res, 200, { ...ctx.adblock.status(), on: ctx.adblock.activeFor(readCookie(req, 'px_ab')) });
@@ -339,6 +340,48 @@ async function handleCookieWrite(ctx: AppContext, req: http.IncomingMessage, res
   } catch {
     return json(res, 400, { error: 'bad_request' });
   }
+}
+
+/**
+ * Optional diagnostics: pages of a browser that opened /__px/diag/on report a
+ * few numbers once a second (see the end of public/client.js). The last few
+ * thousand reports are kept in memory and shown at /__px/diag/log to browsers
+ * that also have diagnostics on. Nothing is written to disk.
+ */
+const DIAG_MAX = 4000;
+const diagLog: unknown[] = [];
+async function handleDiag(ctx: AppContext, req: http.IncomingMessage, res: http.ServerResponse, pathname: string, method: string): Promise<void> {
+  const on = readCookie(req, 'px_diag') === '1';
+  const secure = proxyOrigin(ctx, req).startsWith('https:') ? '; Secure' : '';
+  if (pathname === '/__px/diag/on' && method === 'GET') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': `px_diag=1; Path=/; Max-Age=86400; SameSite=Lax${secure}` });
+    res.end('<!doctype html><meta name="viewport" content="width=device-width"><title>Diagnostics on</title><body style="font:16px system-ui;background:#0b0b0c;color:#eee;padding:24px"><h1>Diagnostics on</h1><p>This browser now reports page statistics to the proxy for 24 hours. Reproduce the problem, then tell Claude.</p><p><a style="color:#8cf" href="/">Open the proxy</a> &middot; <a style="color:#8cf" href="/__px/diag/off">Turn off</a></p>');
+    return;
+  }
+  if (pathname === '/__px/diag/off' && method === 'GET') {
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': `px_diag=; Path=/; Max-Age=0; SameSite=Lax${secure}` });
+    res.end('Diagnostics off.\n');
+    return;
+  }
+  if (!on) return json(res, 404, { error: 'not_found' });
+  if (pathname === '/__px/diag' && method === 'POST') {
+    if (!sameOriginApiRequest(ctx, req)) return json(res, 403, { error: 'forbidden' });
+    let raw = '';
+    try {
+      for await (const chunk of req) {
+        raw += chunk;
+        if (raw.length > 8192) return json(res, 413, { error: 'too_large' });
+      }
+      const entry = JSON.parse(raw) as Record<string, unknown>;
+      diagLog.push({ at: new Date().toISOString(), ua: String(req.headers['user-agent'] ?? '').slice(0, 160), ...entry });
+      if (diagLog.length > DIAG_MAX) diagLog.splice(0, diagLog.length - DIAG_MAX);
+      return json(res, 204, null);
+    } catch {
+      return json(res, 400, { error: 'bad_request' });
+    }
+  }
+  if (pathname === '/__px/diag/log' && method === 'GET') return json(res, 200, diagLog);
+  return json(res, 404, { error: 'not_found' });
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
